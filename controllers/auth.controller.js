@@ -75,4 +75,22 @@ const loginUser = async (req, res) => {
   }
 };
 
-export { createUser, loginUser };
+const logoutUser = async (req, res) => {
+  try {
+    const options = {
+      httpOnly: true,
+      secure: true,
+    };
+
+    return res
+      .clearCookie("token", options)
+      .status(200)
+      .json({ message: "logout successful" });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: error.message, message: "error while logout" });
+  }
+};
+
+export { createUser, loginUser, logoutUser };

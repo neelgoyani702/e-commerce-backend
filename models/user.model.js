@@ -56,8 +56,7 @@ userSchema.methods.checkPassword = async function (password) {
 };
 
 userSchema.methods.generateToken = function () {
-  const secret = process.env.JWT_SECRET + this.email;
-  return jwt.sign({ id: this._id, email: this.email }, secret, {
+  return jwt.sign({ id: this._id, email: this.email }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_TIME,
   });
 };
