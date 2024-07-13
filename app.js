@@ -3,7 +3,9 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 const app = express();
 
+import { sendEmail } from "./services/mail.service.js";
 import authRoute from "./routes/auth.route.js";
+import userRoute from "./routes/user.route.js";
 
 app.use(express.json());
 app.use(cookieParser());
@@ -15,5 +17,6 @@ app.use(
 );
 
 app.use("/auth", authRoute);
+app.use("/user", userRoute);
 
 export default app;

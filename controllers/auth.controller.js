@@ -49,7 +49,7 @@ const loginUser = async (req, res) => {
       });
     }
 
-    const isPasswordMatch = user.checkPassword(password);
+    const isPasswordMatch = await user.checkPassword(password);
 
     if (!isPasswordMatch) {
       return res.status(400).json({ message: "Invalid credentials" });
