@@ -1,6 +1,21 @@
 import Address from "../models/address.model.js";
 import User from "../models/user.model.js";
 
+const getUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.user?._id).select("-password");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    return res.status(200).json({ user: user, message: "User found" });
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message,
+      message: "Unable to get user",
+    });
+  }
+};
+
 const updateUser = async (req, res) => {
   try {
     const { firstName, lastName, phone } = req.body;
@@ -104,4 +119,32 @@ const updateAddress = async (req, res) => {
   }
 };
 
-export { updateUser, changeUserPassword, addAddress, updateAddress };
+const getAddress = async (req, res) => {
+  try {
+    const address = await Address.findOne({ userId: req.user?._id });
+
+    if (!address) {
+      return res.status(404).json({
+        message: "Address not found",
+      });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "Address fetched successfully", address: address });
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message,
+      message: "Unable to get address",
+    });
+  }
+};
+
+export {
+  getUser,
+  updateUser,
+  changeUserPassword,
+  addAddress,
+  updateAddress,
+  getAddress,
+};
