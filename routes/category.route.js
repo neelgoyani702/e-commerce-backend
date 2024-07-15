@@ -24,3 +24,4 @@ router
 router.route("/delete-category/:id").delete(verifyJwt, deleteCategory);
 
 export default router;
+
