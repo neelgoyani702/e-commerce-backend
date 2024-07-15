@@ -1,0 +1,1 @@
+TODO: when we delete category, we should delete all products in that category

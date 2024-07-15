@@ -126,6 +126,10 @@ const deleteCategory = async (req, res) => {
 
     const deletedCategory = await Category.findByIdAndDelete(req.params.id);
 
+    if (!deletedCategory) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
     await deleteFromCloudinary(deletedCategory.image);
 
     res
