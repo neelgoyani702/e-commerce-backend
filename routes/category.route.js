@@ -18,9 +18,9 @@ router
   .post(verifyJwt, multerUpload.single("Image"), createCategory);
 
 router
-  .route("/update-category")
+  .route("/update-category/:id")
   .put(verifyJwt, multerUpload.single("Image"), updateCategory);
 
-router.route("/delete-category").delete(verifyJwt, deleteCategory);
+router.route("/delete-category/:id").delete(verifyJwt, deleteCategory);
 
 export default router;
