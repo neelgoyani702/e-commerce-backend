@@ -10,6 +10,7 @@ import categoryRoute from "./routes/category.route.js";
 import productRoute from "./routes/product.route.js";
 import cartRoute from "./routes/cart.route.js";
 import orderRoute from "./routes/order.route.js";
+import paymentRoute from "./routes/payment.route.js";
 
 app.use(express.json());
 app.use(cookieParser());
@@ -33,5 +34,6 @@ app.use("/category", categoryRoute);
 app.use("/product", productRoute);
 app.use("/cart", cartRoute);
 app.use("/order", orderRoute);
+app.use("/payment", paymentRoute);
 
 export default app;

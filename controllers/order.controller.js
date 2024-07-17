@@ -97,4 +97,84 @@ const cancelOrder = async (req, res) => {
   }
 };
 
-export { getOrders, placeOrder, cancelOrder };
+const deliveredOrder = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(400).json({ message: "Only admin can access" });
+    }
+
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(400).json({ message: "No order found" });
+    }
+
+    if (order.status === "delivered") {
+      return res.status(400).json({ message: "Order already delivered" });
+    }
+
+    order.status = "delivered";
+    const updatedOrder = await order.save();
+
+    if (!updatedOrder) {
+      return res.status(400).json({ message: "order not delivered" });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "order delivered successfully", updatedOrder });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "error in delivering order" });
+  }
+};
+
+const orderHistory = async (req, res) => {
+  try {
+    const orders = await Order.find({ userId: req.user._id });
+
+    if (!orders) {
+      return res.status(400).json({ message: "No orders found" });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "orders fetched successfully", orders });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "error in getting orders" });
+  }
+};
+
+const getAllOrders = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(400).json({ message: "Only admin can access" });
+    }
+
+    const orders = await Order.find().populate("products.productId");
+
+    if (!orders) {
+      return res.status(400).json({ message: "No orders found" });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "orders fetched successfully", orders });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "error in getting orders" });
+  }
+};
+
+export {
+  getOrders,
+  placeOrder,
+  cancelOrder,
+  deliveredOrder,
+  orderHistory,
+  getAllOrders,
+};
