@@ -36,7 +36,8 @@ const userSchema = new mongoose.Schema(
     },
     image: {
       type: String,
-      default: "uploads/default.jpg",
+      default:
+        "http://res.cloudinary.com/youtube-clone-backend/image/upload/v1722067886/llys5ceizey72ik1c5kq.png",
     },
   },
   { timestamps: true }
