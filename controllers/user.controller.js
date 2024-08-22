@@ -121,7 +121,7 @@ const updateAddress = async (req, res) => {
 
 const getAddress = async (req, res) => {
   try {
-    const address = await Address.findOne({ userId: req.user?._id });
+    const address = await Address.find({ userId: req.user?._id });
 
     if (!address) {
       return res.status(404).json({
