@@ -125,6 +125,33 @@ const updateAddress = async (req, res) => {
   }
 };
 
+const deleteAddress = async (req, res) => {
+  try {
+
+    console.log("hello is delete");
+    
+
+    const deletedAddress = await Address.findByIdAndDelete(req.params.id);
+    console.log("deletedAddress",deletedAddress);
+    
+    if (!deletedAddress) {
+      return res.status(404).json({ message: "Address not found" });
+    }
+
+    console.log("deleteaddress found");
+    
+    return res
+      .status(200)
+      .json({ message: "Address deleted successfully", address: deletedAddress });
+
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message,
+      message: "Unable to delete address",
+    });
+  }
+}
+
 const getAddress = async (req, res) => {
   try {
     const address = await Address.find({ userId: req.user?._id });
@@ -152,5 +179,6 @@ export {
   changeUserPassword,
   addAddress,
   updateAddress,
+  deleteAddress,
   getAddress,
 };
