@@ -62,14 +62,17 @@ const changeUserPassword = async (req, res) => {
 
 const addAddress = async (req, res) => {
   try {
-    const { houseNo, area, pinCode, city, state, country } = req.body;
+    const { fullName, phone, houseNo, area, landmark, pinCode, city, state, country } = req.body;
 
     console.log(req.user);
 
     const address = {
       userId: req.user?._id,
+      fullName,
+      phone,
       houseNo,
       area,
+      landmark,
       pinCode,
       city,
       state,
@@ -91,13 +94,16 @@ const addAddress = async (req, res) => {
 
 const updateAddress = async (req, res) => {
   try {
-    const { houseNo, area, pinCode, city, state, country } = req.body;
+    const { fullName, phone, houseNo, area, landmark, pinCode, city, state, country } = req.body;
 
-    const address = await Address.findOneAndUpdate(
-      { userId: req.user?._id },
+    const address = await Address.findByIdAndUpdate(
+      req.params.id,
       {
+        fullName,
+        phone,
         houseNo,
         area,
+        landmark,
         pinCode,
         city,
         state,
