@@ -1,10 +1,10 @@
 import Category from "../models/category.model.js";
+import Product from "../models/products.model.js";
 import User from "../models/user.model.js";
 import {
   uploadOnCloudinary,
   deleteFromCloudinary,
 } from "../services/Cloudinary.service.js";
-import fs from "fs";
 
 const createCategory = async (req, res) => {
   try {
@@ -53,11 +53,34 @@ const createCategory = async (req, res) => {
 const getCategory = async (req, res) => {
   try {
     const categories = await Category.find();
-    res.status(200).json({ categories });
+    res.status(200).json({ message: "Category fetched successfully", categories: categories });
   } catch (error) {
     res
       .status(400)
       .json({ error: error.message, message: "error in get category" });
+  }
+};
+
+const getCategoryProducts = async (req, res) => {
+  try {
+
+    const category = await Category.findById(req.params.id).select("-__v");
+
+    if (!category) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
+    const products = await Product.find({ category: req.params.id }).select("-__v");
+    console.log("products", products);
+
+
+    return res.status(200).json({ message: "Category products fetched successfully", products: products, category: category });
+
+  } catch (error) {
+    res
+      .status(400)
+      .json({ error: error.message, message: "error in get category products" });
+
   }
 };
 
@@ -142,4 +165,4 @@ const deleteCategory = async (req, res) => {
   }
 };
 
-export { getCategory, createCategory, updateCategory, deleteCategory };
+export { getCategory, createCategory, updateCategory, deleteCategory, getCategoryProducts };
