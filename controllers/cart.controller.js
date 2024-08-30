@@ -5,7 +5,7 @@ const getCart = async (req, res) => {
   try {
     const cart = await Cart.findOne({ userId: req.user._id }).populate({
       path: "products.productId",
-      select: "name price",
+      select: "name price image",
     });
 
     if (!cart) {
@@ -22,7 +22,7 @@ const getCart = async (req, res) => {
 
 const addToCart = async (req, res) => {
   try {
-    const { productId, quantity } = req.body;
+    const { productId, quantity = 1, ATC } = req.body;
 
     if (!productId || !quantity) {
       return res
@@ -36,7 +36,6 @@ const addToCart = async (req, res) => {
 
     if (cart) {
       // if cart already exists for the user
-      // const product = cart.products.find((p) => p.productId === productId);
 
       const product = cart.products.find(
         (p) => p.productId.toString() === productId
@@ -45,10 +44,7 @@ const addToCart = async (req, res) => {
       if (product) {
         // if product already exists in the cart
 
-        product.quantity = product.quantity + Number(quantity);
-        product.price = product.price + Number(price);
-
-        if (product.quantity <= 0) {
+        if (Number(quantity) <= 0) {
           cart.products = cart.products.filter(
             (p) => p.productId.toString() !== productId
           );
@@ -56,16 +52,29 @@ const addToCart = async (req, res) => {
         cart.products = cart.products.map((p) =>
           p.productId.toString() === productId ? product : p
         );
+
+        if (ATC) {
+          product.quantity = product.quantity + Number(quantity);
+          product.price = product.price + Number(price);
+
+          cart.totalAmount = cart.totalAmount + price;
+          cart.totalItems = cart.products.length;
+        } else {
+          cart.totalAmount = cart.totalAmount - product.price + price;
+          cart.totalItems = cart.products.length;
+
+          product.quantity = Number(quantity);
+          product.price = Number(price);
+        }
       } else {
         // if product does not exist in the cart
         cart.products.push({ productId, quantity, price });
+        cart.totalAmount = cart.totalAmount + price;
+        cart.totalItems = cart.products.length;
       }
 
-      cart.totalAmount = cart.totalAmount + price;
-      cart.totalItems = cart.totalItems + quantity;
-
       await cart.save();
-
+      console.log("cart", cart);
       return res.status(201).json({ message: "Product added to cart", cart });
     }
 
@@ -77,6 +86,7 @@ const addToCart = async (req, res) => {
       totalItems: quantity,
     });
 
+    console.log("cart", newCart);
     return res
       .status(201)
       .json({ message: "Product added to cart", cart: newCart });
@@ -87,7 +97,7 @@ const addToCart = async (req, res) => {
   }
 };
 
-const updateCart = async (req, res) => {};
+const updateCart = async (req, res) => { };
 
 const deleteCart = async (req, res) => {
   try {
