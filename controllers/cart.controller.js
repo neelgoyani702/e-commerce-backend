@@ -101,7 +101,7 @@ const updateCart = async (req, res) => { };
 
 const deleteCart = async (req, res) => {
   try {
-    const { productId } = req.body;
+    const { productId } = req.params;
 
     const cart = await Cart.findOne({ userId: req.user._id });
     console.log("cart", cart);
