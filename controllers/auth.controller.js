@@ -9,6 +9,10 @@ const createUser = async (req, res) => {
       return res.status(400).json({ message: "All input is required" });
     }
 
+    if (password.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
     const user = await User.findOne({ email });
     if (user) {
       return res
@@ -25,7 +29,19 @@ const createUser = async (req, res) => {
 
     await newUser.save();
 
-    return res.status(201).json({ message: "User created successfully", user: newUser });
+    // Auto-login: generate token and set cookie
+    const token = await newUser.generateToken();
+
+    const options = {
+      httpOnly: true,
+      secure: true,
+      maxAge: 3600 * 24 * 7,
+      sameSite: "strict",
+    };
+
+    res.cookie("token", token, options);
+
+    return res.status(201).json({ message: "User created successfully", user: newUser, token: token });
   } catch (error) {
     return res
       .status(500)

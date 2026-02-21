@@ -20,6 +20,14 @@ const updateUser = async (req, res) => {
   try {
     const { firstName, lastName, phone } = req.body;
 
+    if (!firstName || !lastName) {
+      return res.status(400).json({ message: "First name and last name are required" });
+    }
+
+    if (phone && !/^[0-9]{10}$/.test(phone)) {
+      return res.status(400).json({ message: "Phone number must be 10 digits" });
+    }
+
     const user = await User.findByIdAndUpdate(
       req.user?._id,
       {
@@ -43,6 +51,15 @@ const updateUser = async (req, res) => {
 const changeUserPassword = async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body;
+
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ message: "Both old and new passwords are required" });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: "New password must be at least 6 characters" });
+    }
+
     const user = await User.findById(req.user?._id);
     const isMatch = await user.checkPassword(oldPassword);
     if (!isMatch) {
@@ -64,7 +81,9 @@ const addAddress = async (req, res) => {
   try {
     const { fullName, phone, houseNo, area, landmark, pinCode, city, state, country } = req.body;
 
-    console.log(req.user);
+    if (!area || !city || !state || !pinCode) {
+      return res.status(400).json({ message: "Area, city, state, and pin code are required" });
+    }
 
     const address = {
       userId: req.user?._id,
@@ -96,6 +115,15 @@ const updateAddress = async (req, res) => {
   try {
     const { fullName, phone, houseNo, area, landmark, pinCode, city, state, country } = req.body;
 
+    // Verify ownership
+    const existingAddress = await Address.findById(req.params.id);
+    if (!existingAddress) {
+      return res.status(404).json({ message: "Address not found" });
+    }
+    if (existingAddress.userId.toString() !== req.user?._id.toString()) {
+      return res.status(403).json({ message: "You are not authorized to update this address" });
+    }
+
     const address = await Address.findByIdAndUpdate(
       req.params.id,
       {
@@ -112,8 +140,6 @@ const updateAddress = async (req, res) => {
       { new: true }
     );
 
-    console.log(address);
-
     return res
       .status(200)
       .json({ message: "Address updated successfully", address: address });
@@ -127,30 +153,27 @@ const updateAddress = async (req, res) => {
 
 const deleteAddress = async (req, res) => {
   try {
-
-    console.log("hello is delete");
-    
-
-    const deletedAddress = await Address.findByIdAndDelete(req.params.id);
-    console.log("deletedAddress",deletedAddress);
-    
-    if (!deletedAddress) {
+    // Verify ownership
+    const existingAddress = await Address.findById(req.params.id);
+    if (!existingAddress) {
       return res.status(404).json({ message: "Address not found" });
     }
+    if (existingAddress.userId.toString() !== req.user?._id.toString()) {
+      return res.status(403).json({ message: "You are not authorized to delete this address" });
+    }
 
-    console.log("deleteaddress found");
-    
+    await Address.findByIdAndDelete(req.params.id);
+
     return res
       .status(200)
-      .json({ message: "Address deleted successfully", address: deletedAddress });
-
+      .json({ message: "Address deleted successfully", address: existingAddress });
   } catch (error) {
     return res.status(500).json({
       error: error.message,
       message: "Unable to delete address",
     });
   }
-}
+};
 
 const getAddress = async (req, res) => {
   try {

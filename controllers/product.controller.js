@@ -1,6 +1,7 @@
 import Product from "../models/products.model.js";
 import Category from "../models/category.model.js";
 import User from "../models/user.model.js";
+import fs from "fs";
 import {
   uploadOnCloudinary,
   deleteFromCloudinary,
@@ -13,13 +14,24 @@ const createProduct = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
     if (user.role !== "admin") {
-      return res.status(404).json({ message: "User have no admin access" });
+      return res.status(403).json({ message: "Admin access required" });
     }
 
     let { name, description, price, category, bulletPoints, size } = req.body;
 
-    category = category.toLowerCase();
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: "Product name is required" });
+    }
 
+    if (!price || isNaN(price) || Number(price) <= 0) {
+      return res.status(400).json({ message: "Valid price is required" });
+    }
+
+    if (!category) {
+      return res.status(400).json({ message: "Category is required" });
+    }
+
+    category = category.toLowerCase();
     const categoryExist = await Category.findOne({ name: category });
 
     if (!categoryExist) {
@@ -28,19 +40,24 @@ const createProduct = async (req, res) => {
 
     const productImagePath = req.file?.path;
     if (!productImagePath) {
-      return res.status(400).json({ message: "product image is required" });
+      return res.status(400).json({ message: "Product image is required" });
     }
 
     const productImageURL = await uploadOnCloudinary(productImagePath);
 
     if (!productImageURL) {
-      return res.status(400).json({ message: "products image upload failed" });
+      return res.status(400).json({ message: "Product image upload failed" });
+    }
+
+    // Clean up temp file
+    if (fs.existsSync(productImagePath)) {
+      fs.unlinkSync(productImagePath);
     }
 
     const product = new Product({
-      name,
-      description,
-      price,
+      name: name.trim(),
+      description: description?.trim(),
+      price: Number(price),
       category: categoryExist._id,
       bulletPoints,
       image: productImageURL.url,
@@ -56,8 +73,8 @@ const createProduct = async (req, res) => {
     });
   } catch (error) {
     res
-      .status(400)
-      .json({ error: error.message, message: "error in create product" });
+      .status(500)
+      .json({ error: error.message, message: "Error creating product" });
   }
 };
 
@@ -67,17 +84,13 @@ const getProducts = async (req, res) => {
       .populate("category", "name")
       .select("-__v");
 
-    if (!products) {
-      return res.status(404).json({ message: "Products not found" });
-    }
-
     res
       .status(200)
-      .json({ message: "All products fetched successfully", products });
+      .json({ message: "All products fetched successfully", products: products || [] });
   } catch (error) {
     res
-      .status(400)
-      .json({ error: error.message, message: "error in get products" });
+      .status(500)
+      .json({ error: error.message, message: "Error fetching products" });
   }
 };
 
@@ -94,8 +107,8 @@ const getProductById = async (req, res) => {
     res.status(200).json({ message: "Product fetched successfully", product });
   } catch (error) {
     res
-      .status(400)
-      .json({ error: error.message, message: "error in get product by id" });
+      .status(500)
+      .json({ error: error.message, message: "Error fetching product" });
   }
 };
 
@@ -106,7 +119,7 @@ const updateProduct = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
     if (user.role !== "admin") {
-      return res.status(404).json({ message: "User have no admin access" });
+      return res.status(403).json({ message: "Admin access required" });
     }
 
     let { name, description, price, bulletPoints, size } = req.body;
@@ -120,25 +133,35 @@ const updateProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
+    // Update image if provided
     if (productImagePath) {
       const productImageURL = await uploadOnCloudinary(productImagePath);
 
       if (!productImageURL) {
         return res
           .status(400)
-          .json({ message: "products image upload failed" });
+          .json({ message: "Product image upload failed" });
       }
 
-      await deleteFromCloudinary(product.image);
+      // Delete old image
+      if (product.image) {
+        await deleteFromCloudinary(product.image);
+      }
 
       product.image = productImageURL.url;
+
+      // Clean up temp file
+      if (fs.existsSync(productImagePath)) {
+        fs.unlinkSync(productImagePath);
+      }
     }
 
-    product.name = name ? name : product.name;
-    product.description = description ? description : product.description;
-    product.price = price ? price : product.price;
-    product.bulletPoints = bulletPoints ? bulletPoints : product.bulletPoints;
-    product.size = size ? size : product.size;
+    // Update fields if provided
+    if (name && name.trim()) product.name = name.trim();
+    if (description !== undefined) product.description = description.trim();
+    if (price && !isNaN(price) && Number(price) > 0) product.price = Number(price);
+    if (bulletPoints) product.bulletPoints = bulletPoints;
+    if (size) product.size = size;
 
     const updatedProduct = await product.save();
 
@@ -149,7 +172,7 @@ const updateProduct = async (req, res) => {
   } catch (error) {
     return res
       .status(500)
-      .json({ error: error.message, message: "error in update product" });
+      .json({ error: error.message, message: "Error updating product" });
   }
 };
 
@@ -160,7 +183,7 @@ const deleteProduct = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
     if (user.role !== "admin") {
-      return res.status(404).json({ message: "User have no admin access" });
+      return res.status(403).json({ message: "Admin access required" });
     }
 
     const product = await Product.findByIdAndDelete(req.params.id)
@@ -171,7 +194,10 @@ const deleteProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    await deleteFromCloudinary(product.image);
+    // Delete image from cloudinary
+    if (product.image) {
+      await deleteFromCloudinary(product.image);
+    }
 
     return res.status(200).json({
       message: "Product deleted successfully",
@@ -179,8 +205,8 @@ const deleteProduct = async (req, res) => {
     });
   } catch (error) {
     return res
-      .status(400)
-      .json({ error: error.message, message: "error in delete product" });
+      .status(500)
+      .json({ error: error.message, message: "Error deleting product" });
   }
 };
 
