@@ -6,6 +6,7 @@ import {
   getAllUsers,
   updateUserRole,
   updateOrderStatus,
+  getActivityLog,
 } from "../controllers/admin.controller.js";
 
 const router = Router();
@@ -17,5 +18,6 @@ router.route("/stats").get(getDashboardStats);
 router.route("/users").get(getAllUsers);
 router.route("/users/:id/role").put(updateUserRole);
 router.route("/orders/:id/status").put(updateOrderStatus);
+router.route("/activity-log").get(getActivityLog);
 
 export default router;

@@ -6,6 +6,7 @@ import {
   uploadOnCloudinary,
   deleteFromCloudinary,
 } from "../services/Cloudinary.service.js";
+import { logActivity } from "./admin.controller.js";
 
 const createCategory = async (req, res) => {
   try {
@@ -45,6 +46,8 @@ const createCategory = async (req, res) => {
     if (fs.existsSync(categoryImagePath)) {
       fs.unlinkSync(categoryImagePath);
     }
+
+    await logActivity(req.user._id, "category_created", "category", savedCategory._id, savedCategory.name, "Category created");
 
     res.status(201).json({
       message: "Category created successfully",
@@ -106,9 +109,12 @@ const updateCategory = async (req, res) => {
     }
 
     // Update name if provided
-    const { name } = req.body;
+    const { name, isActive } = req.body;
     if (name && name.trim()) {
       category.name = name.trim();
+    }
+    if (isActive !== undefined) {
+      category.isActive = isActive === true || isActive === "true";
     }
 
     // Update image if provided
@@ -133,6 +139,8 @@ const updateCategory = async (req, res) => {
     }
 
     const updatedCategory = await category.save();
+
+    await logActivity(req.user._id, "category_updated", "category", updatedCategory._id, updatedCategory.name, "Category details updated");
 
     res.status(200).json({
       message: "Category updated successfully",
@@ -168,6 +176,8 @@ const deleteCategory = async (req, res) => {
 
     // Also delete all products in this category
     await Product.deleteMany({ category: req.params.id });
+
+    await logActivity(req.user._id, "category_deleted", "category", deletedCategory._id, deletedCategory.name, "Category and associated products deleted");
 
     res
       .status(200)

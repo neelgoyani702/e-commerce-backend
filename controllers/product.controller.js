@@ -6,6 +6,7 @@ import {
   uploadOnCloudinary,
   deleteFromCloudinary,
 } from "../services/Cloudinary.service.js";
+import { logActivity } from "./admin.controller.js";
 
 const createProduct = async (req, res) => {
   try {
@@ -68,6 +69,8 @@ const createProduct = async (req, res) => {
     });
 
     const savedProduct = await product.save();
+
+    await logActivity(req.user._id, "product_created", "product", savedProduct._id, savedProduct.name, `Price: ₹${savedProduct.price}`);
 
     res.status(201).json({
       message: "Product created successfully",
@@ -171,6 +174,8 @@ const updateProduct = async (req, res) => {
 
     const updatedProduct = await product.save();
 
+    await logActivity(req.user._id, "product_updated", "product", updatedProduct._id, updatedProduct.name, "Product details updated");
+
     return res.status(200).json({
       message: "Product updated successfully",
       product: updatedProduct,
@@ -204,6 +209,8 @@ const deleteProduct = async (req, res) => {
     if (product.image) {
       await deleteFromCloudinary(product.image);
     }
+
+    await logActivity(req.user._id, "product_deleted", "product", product._id, product.name, "Product deleted");
 
     return res.status(200).json({
       message: "Product deleted successfully",
