@@ -17,7 +17,7 @@ const createProduct = async (req, res) => {
       return res.status(403).json({ message: "Admin access required" });
     }
 
-    let { name, description, price, category, bulletPoints, size } = req.body;
+    let { name, description, price, category, bulletPoints, size, stock, discount, featured } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: "Product name is required" });
@@ -62,6 +62,9 @@ const createProduct = async (req, res) => {
       bulletPoints,
       image: productImageURL.url,
       size,
+      stock: stock ? Number(stock) : 0,
+      discount: discount ? Number(discount) : 0,
+      featured: featured === true || featured === "true",
     });
 
     const savedProduct = await product.save();
@@ -122,7 +125,7 @@ const updateProduct = async (req, res) => {
       return res.status(403).json({ message: "Admin access required" });
     }
 
-    let { name, description, price, bulletPoints, size } = req.body;
+    let { name, description, price, bulletPoints, size, stock, discount, featured } = req.body;
     const productImagePath = req.file?.path;
 
     const product = await Product.findById(req.params.id)
@@ -162,6 +165,9 @@ const updateProduct = async (req, res) => {
     if (price && !isNaN(price) && Number(price) > 0) product.price = Number(price);
     if (bulletPoints) product.bulletPoints = bulletPoints;
     if (size) product.size = size;
+    if (stock !== undefined) product.stock = Number(stock);
+    if (discount !== undefined) product.discount = Number(discount);
+    if (featured !== undefined) product.featured = featured === true || featured === "true";
 
     const updatedProduct = await product.save();
 
