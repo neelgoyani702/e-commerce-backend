@@ -19,12 +19,15 @@ const activityLogSchema = new mongoose.Schema(
         "category_deleted",
         "order_status_updated",
         "user_role_updated",
+        "coupon_created",
+        "coupon_updated",
+        "coupon_deleted",
       ],
     },
     targetType: {
       type: String,
       required: true,
-      enum: ["product", "category", "order", "user"],
+      enum: ["product", "category", "order", "user", "coupon"],
     },
     targetId: {
       type: mongoose.Schema.Types.ObjectId,

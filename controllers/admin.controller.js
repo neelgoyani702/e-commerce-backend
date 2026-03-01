@@ -390,4 +390,193 @@ const getActivityLog = async (req, res) => {
   }
 };
 
-export { getDashboardStats, getAllUsers, updateUserRole, updateOrderStatus, getActivityLog, logActivity };
+// #12 — Low Stock / Inventory Alerts
+const getLowStockProducts = async (req, res) => {
+  try {
+    const threshold = Number(req.query.threshold) || 5;
+    const products = await Product.find({ stock: { $lte: threshold } })
+      .populate("category", "name")
+      .sort({ stock: 1 })
+      .select("name image price stock category");
+
+    return res.status(200).json({
+      message: "Low stock products fetched",
+      products,
+      threshold,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error fetching low stock products" });
+  }
+};
+
+// #13 — Customer Insights
+const getCustomerInsights = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const customer = await User.findById(id).select("-password");
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Get all orders for this customer
+    const orders = await Order.find({ userId: id })
+      .populate("products.productId", "name price image")
+      .sort({ createdAt: -1 });
+
+    // Compute stats
+    const totalOrders = orders.length;
+    const totalSpent = orders
+      .filter((o) => o.status !== "cancelled")
+      .reduce((sum, o) => sum + (o.totalAmount || 0), 0);
+    const deliveredOrders = orders.filter((o) => o.status === "delivered").length;
+    const cancelledOrders = orders.filter((o) => o.status === "cancelled").length;
+
+    // Average order value
+    const validOrders = orders.filter((o) => o.status !== "cancelled");
+    const avgOrderValue = validOrders.length > 0
+      ? Math.round(totalSpent / validOrders.length)
+      : 0;
+
+    // Most ordered products
+    const productCounts = {};
+    orders.forEach((o) => {
+      if (o.status !== "cancelled") {
+        o.products?.forEach((p) => {
+          const pid = p.productId?._id?.toString();
+          if (pid) {
+            if (!productCounts[pid]) {
+              productCounts[pid] = {
+                name: p.productId.name,
+                image: p.productId.image,
+                count: 0,
+                totalSpent: 0,
+              };
+            }
+            productCounts[pid].count += p.quantity || 1;
+            productCounts[pid].totalSpent += p.price || 0;
+          }
+        });
+      }
+    });
+    const topProducts = Object.values(productCounts)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    return res.status(200).json({
+      message: "Customer insights fetched",
+      customer,
+      stats: {
+        totalOrders,
+        totalSpent,
+        deliveredOrders,
+        cancelledOrders,
+        avgOrderValue,
+      },
+      topProducts,
+      recentOrders: orders.slice(0, 10),
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error fetching customer insights" });
+  }
+};
+
+// #14 — Coupon CRUD
+import Coupon from "../models/coupon.model.js";
+
+const getCoupons = async (req, res) => {
+  try {
+    const coupons = await Coupon.find().sort({ createdAt: -1 });
+    return res.status(200).json({ message: "Coupons fetched", coupons });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error fetching coupons" });
+  }
+};
+
+const createCoupon = async (req, res) => {
+  try {
+    const { code, discountType, discountValue, minOrderAmount, maxUses, expiresAt } = req.body;
+    if (!code || !discountType || !discountValue) {
+      return res.status(400).json({ message: "Code, discount type and value are required" });
+    }
+    const existing = await Coupon.findOne({ code: code.toUpperCase() });
+    if (existing) {
+      return res.status(400).json({ message: "Coupon code already exists" });
+    }
+    const coupon = await Coupon.create({
+      code: code.toUpperCase(),
+      discountType,
+      discountValue: Number(discountValue),
+      minOrderAmount: Number(minOrderAmount) || 0,
+      maxUses: Number(maxUses) || 0,
+      expiresAt: expiresAt || null,
+    });
+
+    await logActivity(req.user._id, "coupon_created", "coupon", coupon._id, coupon.code, `Coupon created: ${discountType} ${discountValue}`);
+
+    return res.status(201).json({ message: "Coupon created", coupon });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error creating coupon" });
+  }
+};
+
+const updateCoupon = async (req, res) => {
+  try {
+    const { isActive, discountValue, minOrderAmount, maxUses, expiresAt } = req.body;
+    const coupon = await Coupon.findById(req.params.id);
+    if (!coupon) return res.status(404).json({ message: "Coupon not found" });
+
+    if (isActive !== undefined) coupon.isActive = isActive === true || isActive === "true";
+    if (discountValue !== undefined) coupon.discountValue = Number(discountValue);
+    if (minOrderAmount !== undefined) coupon.minOrderAmount = Number(minOrderAmount);
+    if (maxUses !== undefined) coupon.maxUses = Number(maxUses);
+    if (expiresAt !== undefined) coupon.expiresAt = expiresAt || null;
+
+    const updated = await coupon.save();
+
+    await logActivity(req.user._id, "coupon_updated", "coupon", updated._id, updated.code, "Coupon updated");
+
+    return res.status(200).json({ message: "Coupon updated", coupon: updated });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error updating coupon" });
+  }
+};
+
+const deleteCoupon = async (req, res) => {
+  try {
+    const coupon = await Coupon.findByIdAndDelete(req.params.id);
+    if (!coupon) return res.status(404).json({ message: "Coupon not found" });
+
+    await logActivity(req.user._id, "coupon_deleted", "coupon", coupon._id, coupon.code, "Coupon deleted");
+
+    return res.status(200).json({ message: "Coupon deleted" });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error deleting coupon" });
+  }
+};
+
+export {
+  getDashboardStats,
+  getAllUsers,
+  updateUserRole,
+  updateOrderStatus,
+  getActivityLog,
+  logActivity,
+  getLowStockProducts,
+  getCustomerInsights,
+  getCoupons,
+  createCoupon,
+  updateCoupon,
+  deleteCoupon,
+};
