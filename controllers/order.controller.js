@@ -1,12 +1,13 @@
 import Order from "../models/order.model.js";
 import Cart from "../models/cart.model.js";
+import Product from "../models/products.model.js";
 
 const getOrders = async (req, res) => {
   try {
     const orders = await Order.find({
       userId: req.user._id,
       status: "order placed",
-    }).populate("products.productId", "name price image");
+    }).populate("products.productId", "name price image discount stock");
 
     return res
       .status(200)
@@ -20,12 +21,40 @@ const getOrders = async (req, res) => {
 
 const placeOrder = async (req, res) => {
   try {
-    const cart = await Cart.findOne({ userId: req.user._id });
+    const cart = await Cart.findOne({ userId: req.user._id }).populate({
+      path: "products.productId",
+      select: "name price image discount stock",
+    });
 
     if (!cart || !cart.products || cart.products.length === 0) {
       return res.status(400).json({ message: "Your cart is empty" });
     }
 
+    // Validate stock for all products before placing order
+    const stockErrors = [];
+    for (const item of cart.products) {
+      const product = await Product.findById(item.productId._id || item.productId);
+      if (!product) {
+        stockErrors.push(`Product "${item.productId.name || 'Unknown'}" is no longer available`);
+        continue;
+      }
+      if (product.stock < item.quantity) {
+        if (product.stock === 0) {
+          stockErrors.push(`"${product.name}" is out of stock`);
+        } else {
+          stockErrors.push(`Only ${product.stock} "${product.name}" available (you have ${item.quantity} in cart)`);
+        }
+      }
+    }
+
+    if (stockErrors.length > 0) {
+      return res.status(400).json({
+        message: "Some items have stock issues",
+        errors: stockErrors,
+      });
+    }
+
+    // Create the order
     const order = new Order({
       userId: req.user._id,
       totalItems: cart.totalItems,
@@ -39,13 +68,21 @@ const placeOrder = async (req, res) => {
       return res.status(500).json({ message: "Failed to place order" });
     }
 
+    // Decrement stock for each product
+    for (const item of cart.products) {
+      const productId = item.productId._id || item.productId;
+      await Product.findByIdAndUpdate(productId, {
+        $inc: { stock: -item.quantity },
+      });
+    }
+
     // Clear the cart after successful order placement
     await Cart.findOneAndDelete({ userId: req.user._id });
 
     // Populate product details for the response
     const populatedOrder = await Order.findById(savedOrder._id).populate(
       "products.productId",
-      "name price image"
+      "name price image discount stock"
     );
 
     return res
@@ -77,6 +114,14 @@ const cancelOrder = async (req, res) => {
 
     if (order.status === "delivered") {
       return res.status(400).json({ message: "Delivered orders cannot be cancelled" });
+    }
+
+    // Restore stock for each product
+    for (const item of order.products) {
+      const productId = item.productId._id || item.productId;
+      await Product.findByIdAndUpdate(productId, {
+        $inc: { stock: item.quantity },
+      });
     }
 
     order.status = "cancelled";
@@ -128,7 +173,7 @@ const deliveredOrder = async (req, res) => {
 const orderHistory = async (req, res) => {
   try {
     const orders = await Order.find({ userId: req.user._id })
-      .populate("products.productId", "name price image")
+      .populate("products.productId", "name price image discount stock")
       .sort({ createdAt: -1 });
 
     return res
@@ -149,7 +194,7 @@ const getAllOrders = async (req, res) => {
 
     const orders = await Order.find()
       .populate("userId", "firstName lastName email image")
-      .populate("products.productId", "name price image")
+      .populate("products.productId", "name price image discount stock")
       .sort({ createdAt: -1 });
 
     return res

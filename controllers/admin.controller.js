@@ -341,6 +341,16 @@ const updateOrderStatus = async (req, res) => {
         .json({ message: "Cancelled orders cannot be changed" });
     }
 
+    // Restore stock when cancelling (only if not already cancelled)
+    if (status === "cancelled" && order.status !== "cancelled") {
+      for (const item of order.products) {
+        const productId = item.productId._id || item.productId;
+        await Product.findByIdAndUpdate(productId, {
+          $inc: { stock: item.quantity },
+        });
+      }
+    }
+
     order.status = status;
     const updatedOrder = await order.save();
 

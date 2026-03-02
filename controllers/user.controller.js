@@ -196,6 +196,67 @@ const getAddress = async (req, res) => {
   }
 };
 
+const toggleWishlist = async (req, res) => {
+  try {
+    const { productId } = req.params;
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const index = user.wishlist.indexOf(productId);
+    let action;
+
+    if (index > -1) {
+      // Already in wishlist — remove
+      user.wishlist.splice(index, 1);
+      action = "removed";
+    } else {
+      // Not in wishlist — add
+      user.wishlist.push(productId);
+      action = "added";
+    }
+
+    await user.save({ validateBeforeSave: false });
+
+    return res.status(200).json({
+      message: action === "added" ? "Added to wishlist" : "Removed from wishlist",
+      wishlist: user.wishlist,
+      action,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message,
+      message: "Error updating wishlist",
+    });
+  }
+};
+
+const getWishlist = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).populate({
+      path: "wishlist",
+      select: "name price image discount stock category",
+      populate: { path: "category", select: "name" },
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "Wishlist fetched successfully",
+      wishlist: user.wishlist || [],
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message,
+      message: "Error fetching wishlist",
+    });
+  }
+};
+
 export {
   getUser,
   updateUser,
@@ -204,4 +265,6 @@ export {
   updateAddress,
   deleteAddress,
   getAddress,
+  toggleWishlist,
+  getWishlist,
 };

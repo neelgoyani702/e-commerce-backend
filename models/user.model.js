@@ -39,6 +39,12 @@ const userSchema = new mongoose.Schema(
       default:
         "https://res.cloudinary.com/youtube-clone-backend/image/upload/v1724481124/ah0jjn1gv6kdkloipxak.jpg",
     },
+    wishlist: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Product",
+      },
+    ],
   },
   { timestamps: true }
 );

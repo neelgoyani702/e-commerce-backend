@@ -8,6 +8,8 @@ import {
   getAddress,
   getUser,
   deleteAddress,
+  toggleWishlist,
+  getWishlist,
 } from "../controllers/user.controller.js";
 
 const router = Router();
@@ -19,5 +21,7 @@ router.route("/add-address").post(verifyJwt, addAddress);
 router.route("/update-address/:id").put(verifyJwt, updateAddress);
 router.route("/delete-address/:id").delete(verifyJwt, deleteAddress);
 router.route("/get-address").get(verifyJwt, getAddress);
+router.route("/wishlist").get(verifyJwt, getWishlist);
+router.route("/wishlist/:productId").post(verifyJwt, toggleWishlist);
 
 export default router;

@@ -223,10 +223,37 @@ const deleteProduct = async (req, res) => {
   }
 };
 
+const getRelatedProducts = async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id).select("category");
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const relatedProducts = await Product.find({
+      category: product.category,
+      _id: { $ne: product._id },
+    })
+      .populate("category", "name")
+      .select("-__v")
+      .limit(4);
+
+    res.status(200).json({
+      message: "Related products fetched successfully",
+      products: relatedProducts,
+    });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: error.message, message: "Error fetching related products" });
+  }
+};
+
 export {
   createProduct,
   getProducts,
   getProductById,
   updateProduct,
   deleteProduct,
+  getRelatedProducts,
 };

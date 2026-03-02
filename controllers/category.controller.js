@@ -62,7 +62,12 @@ const createCategory = async (req, res) => {
 
 const getCategory = async (req, res) => {
   try {
-    const categories = await Category.find();
+    const filter = {};
+    if (req.query.active === "true") {
+      // Use $ne: false to include documents where isActive doesn't exist (old data)
+      filter.isActive = { $ne: false };
+    }
+    const categories = await Category.find(filter);
     res.status(200).json({ message: "Category fetched successfully", categories: categories });
   } catch (error) {
     res
