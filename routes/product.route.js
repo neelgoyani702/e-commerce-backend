@@ -7,6 +7,7 @@ import {
   updateProduct,
   deleteProduct,
   getRelatedProducts,
+  searchProducts,
 } from "../controllers/product.controller.js";
 
 import { multerProductUpload } from "../middlewares/multer.middleware.js";
@@ -17,6 +18,7 @@ router
   .route("/create-product")
   .post(verifyJwt, multerProductUpload.single("Image"), createProduct);
 router.route("/get-products").get(getProducts);
+router.route("/search").get(searchProducts);
 router.route("/get-product/:id").get(getProductById);
 router.route("/get-product/:id/related").get(getRelatedProducts);
 router
@@ -25,4 +27,5 @@ router
 router.route("/delete-product/:id").delete(verifyJwt, deleteProduct);
 
 export default router;
+
 

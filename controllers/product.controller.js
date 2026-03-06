@@ -1,12 +1,53 @@
 import Product from "../models/products.model.js";
 import Category from "../models/category.model.js";
 import User from "../models/user.model.js";
+import Review from "../models/review.model.js";
 import fs from "fs";
 import {
   uploadOnCloudinary,
   deleteFromCloudinary,
 } from "../services/Cloudinary.service.js";
 import { logActivity } from "./admin.controller.js";
+
+// Normalize bulletPoints from FormData — handles JSON strings, arrays, double-encoded, etc.
+function parseBulletPoints(bp) {
+  if (!bp) return [];
+  // Already a proper array of strings
+  if (Array.isArray(bp)) {
+    // Each element might be a JSON string itself (double-encoded)
+    return bp.flatMap(item => {
+      if (typeof item === 'string') {
+        const trimmed = item.trim();
+        // Check if this string is a JSON array (double-encoded)
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) return parsed.map(s => String(s).trim()).filter(Boolean);
+          } catch { /* not valid JSON, treat as plain string */ }
+        }
+        // Check if comma-separated
+        if (trimmed.includes(',') && !trimmed.includes('"')) {
+          return trimmed.split(',').map(s => s.trim()).filter(Boolean);
+        }
+        return trimmed ? [trimmed] : [];
+      }
+      return [String(item)];
+    }).filter(Boolean);
+  }
+  // It's a string — try parsing as JSON first
+  if (typeof bp === 'string') {
+    const trimmed = bp.trim();
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parseBulletPoints(parsed); // recurse to handle double-encoding
+      } catch { /* not valid JSON */ }
+    }
+    // Comma-separated fallback
+    return trimmed.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+}
 
 const createProduct = async (req, res) => {
   try {
@@ -60,7 +101,7 @@ const createProduct = async (req, res) => {
       description: description?.trim(),
       price: Number(price),
       category: categoryExist._id,
-      bulletPoints,
+      bulletPoints: parseBulletPoints(bulletPoints),
       image: productImageURL.url,
       size,
       stock: stock ? Number(stock) : 0,
@@ -90,9 +131,33 @@ const getProducts = async (req, res) => {
       .populate("category", "name")
       .select("-__v");
 
+    // Aggregate review stats for all products
+    const reviewStats = await Review.aggregate([
+      {
+        $group: {
+          _id: "$productId",
+          avgRating: { $avg: "$rating" },
+          reviewCount: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const statsMap = {};
+    reviewStats.forEach((s) => {
+      statsMap[s._id.toString()] = { avgRating: s.avgRating, reviewCount: s.reviewCount };
+    });
+
+    const productsWithRatings = products.map((p) => {
+      const obj = p.toObject();
+      const stats = statsMap[p._id.toString()];
+      obj.avgRating = stats ? Math.round(stats.avgRating * 10) / 10 : 0;
+      obj.reviewCount = stats ? stats.reviewCount : 0;
+      return obj;
+    });
+
     res
       .status(200)
-      .json({ message: "All products fetched successfully", products: products || [] });
+      .json({ message: "All products fetched successfully", products: productsWithRatings });
   } catch (error) {
     res
       .status(500)
@@ -166,7 +231,7 @@ const updateProduct = async (req, res) => {
     if (name && name.trim()) product.name = name.trim();
     if (description !== undefined) product.description = description.trim();
     if (price && !isNaN(price) && Number(price) > 0) product.price = Number(price);
-    if (bulletPoints) product.bulletPoints = bulletPoints;
+    if (bulletPoints) product.bulletPoints = parseBulletPoints(bulletPoints);
     if (size) product.size = size;
     if (stock !== undefined) product.stock = Number(stock);
     if (discount !== undefined) product.discount = Number(discount);
@@ -249,6 +314,40 @@ const getRelatedProducts = async (req, res) => {
   }
 };
 
+const searchProducts = async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || !q.trim()) {
+      return res.status(200).json({ products: [], categories: [] });
+    }
+
+    const searchRegex = new RegExp(q.trim(), "i");
+
+    const [products, categories] = await Promise.all([
+      Product.find({
+        $or: [
+          { name: searchRegex },
+          { description: searchRegex },
+        ],
+      })
+        .populate("category", "name")
+        .select("name price image discount category stock")
+        .limit(8),
+      Category.find({ name: searchRegex, isActive: true })
+        .select("name image")
+        .limit(4),
+    ]);
+
+    res.status(200).json({
+      message: "Search results fetched",
+      products: products || [],
+      categories: categories || [],
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message, message: "Search failed" });
+  }
+};
+
 export {
   createProduct,
   getProducts,
@@ -256,4 +355,5 @@ export {
   updateProduct,
   deleteProduct,
   getRelatedProducts,
+  searchProducts,
 };

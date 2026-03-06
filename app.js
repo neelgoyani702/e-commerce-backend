@@ -13,6 +13,8 @@ import orderRoute from "./routes/order.route.js";
 import paymentRoute from "./routes/payment.route.js";
 import adminRoute from "./routes/admin.route.js";
 import settingsRoute from "./routes/settings.route.js";
+import reviewRoute from "./routes/review.route.js";
+import couponRoute from "./routes/coupon.route.js";
 
 app.use(express.json());
 app.use(cookieParser());
@@ -39,5 +41,7 @@ app.use("/order", orderRoute);
 app.use("/payment", paymentRoute);
 app.use("/admin", adminRoute);
 app.use("/settings", settingsRoute);
+app.use("/review", reviewRoute);
+app.use("/coupon", couponRoute);
 
 export default app;

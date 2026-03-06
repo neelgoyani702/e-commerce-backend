@@ -1,6 +1,7 @@
 import Order from "../models/order.model.js";
 import Cart from "../models/cart.model.js";
 import Product from "../models/products.model.js";
+import Coupon from "../models/coupon.model.js";
 
 const getOrders = async (req, res) => {
   try {
@@ -21,6 +22,8 @@ const getOrders = async (req, res) => {
 
 const placeOrder = async (req, res) => {
   try {
+    const { couponCode } = req.body;
+
     const cart = await Cart.findOne({ userId: req.user._id }).populate({
       path: "products.productId",
       select: "name price image discount stock",
@@ -54,11 +57,42 @@ const placeOrder = async (req, res) => {
       });
     }
 
+    // Handle coupon validation and discount
+    let couponDiscount = 0;
+    let appliedCouponCode = null;
+
+    if (couponCode) {
+      const coupon = await Coupon.findOne({ code: couponCode.toUpperCase().trim() });
+
+      if (coupon && coupon.isActive) {
+        const notExpired = !coupon.expiresAt || new Date(coupon.expiresAt) >= new Date();
+        const withinLimit = coupon.maxUses === 0 || coupon.usedCount < coupon.maxUses;
+        const meetsMinimum = cart.totalAmount >= coupon.minOrderAmount;
+
+        if (notExpired && withinLimit && meetsMinimum) {
+          if (coupon.discountType === "percentage") {
+            couponDiscount = Math.round((cart.totalAmount * coupon.discountValue) / 100);
+          } else {
+            couponDiscount = coupon.discountValue;
+          }
+          couponDiscount = Math.min(couponDiscount, cart.totalAmount);
+          appliedCouponCode = coupon.code;
+
+          // Increment usage count
+          await Coupon.findByIdAndUpdate(coupon._id, { $inc: { usedCount: 1 } });
+        }
+      }
+    }
+
+    const finalAmount = cart.totalAmount - couponDiscount;
+
     // Create the order
     const order = new Order({
       userId: req.user._id,
       totalItems: cart.totalItems,
-      totalAmount: cart.totalAmount,
+      totalAmount: finalAmount,
+      couponCode: appliedCouponCode,
+      couponDiscount,
       products: cart.products,
     });
 
