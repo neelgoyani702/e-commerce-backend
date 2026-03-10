@@ -14,17 +14,23 @@ const uploadOnCloudinary = async (localFilePath) => {
 
     // upload the file on cloudinary
     const response = await cloudinary.uploader.upload(localFilePath, {
+      folder: "e_commerce",
       resource_type: "auto",
     });
 
-    // remove the locally saved temperary file as the upload on operation got successfull
-    // fs.unlinkSync(localFilePath);
+    // Verify the response has a valid URL
+    if (!response || !response.url) {
+      console.error("Cloudinary upload returned no URL:", response);
+      if (fs.existsSync(localFilePath)) fs.unlinkSync(localFilePath);
+      return null;
+    }
 
     return response;
   } catch (error) {
-    // remove the locally saved temperary file as the upload on operation got failed
-    fs.unlinkSync(localFilePath);
-    return error;
+    console.error("Cloudinary upload failed:", error.message || error);
+    // remove the locally saved temporary file as the upload operation failed
+    if (fs.existsSync(localFilePath)) fs.unlinkSync(localFilePath);
+    return null;
   }
 };
 

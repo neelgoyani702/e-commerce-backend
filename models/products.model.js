@@ -21,11 +21,18 @@ const productSchema = new mongoose.Schema(
     bulletPoints: [{ type: String }],
     image: {
       type: String,
-      required: true,
     },
-    size: {
+    images: [{
       type: String,
-    },
+    }],
+    variants: [{
+      size: { type: String },
+      color: { type: String },
+      colorCode: { type: String },
+      stock: { type: Number, default: 0 },
+      priceOverride: { type: Number, default: null },
+      sku: { type: String },
+    }],
     stock: {
       type: Number,
       default: 0,

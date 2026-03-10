@@ -26,7 +26,7 @@ const placeOrder = async (req, res) => {
 
     const cart = await Cart.findOne({ userId: req.user._id }).populate({
       path: "products.productId",
-      select: "name price image discount stock",
+      select: "name price image discount stock variants",
     });
 
     if (!cart || !cart.products || cart.products.length === 0) {
@@ -41,11 +41,26 @@ const placeOrder = async (req, res) => {
         stockErrors.push(`Product "${item.productId.name || 'Unknown'}" is no longer available`);
         continue;
       }
-      if (product.stock < item.quantity) {
-        if (product.stock === 0) {
-          stockErrors.push(`"${product.name}" is out of stock`);
-        } else {
-          stockErrors.push(`Only ${product.stock} "${product.name}" available (you have ${item.quantity} in cart)`);
+
+      // Check variant-level or product-level stock
+      if (item.variantId && product.variants?.length > 0) {
+        const variant = product.variants.id(item.variantId);
+        if (!variant) {
+          stockErrors.push(`Selected variant for "${product.name}" is no longer available`);
+        } else if (variant.stock < item.quantity) {
+          if (variant.stock === 0) {
+            stockErrors.push(`"${product.name} (${item.variantLabel || ''})" is out of stock`);
+          } else {
+            stockErrors.push(`Only ${variant.stock} "${product.name} (${item.variantLabel || ''})" available (you have ${item.quantity} in cart)`);
+          }
+        }
+      } else {
+        if (product.stock < item.quantity) {
+          if (product.stock === 0) {
+            stockErrors.push(`"${product.name}" is out of stock`);
+          } else {
+            stockErrors.push(`Only ${product.stock} "${product.name}" available (you have ${item.quantity} in cart)`);
+          }
         }
       }
     }
@@ -102,12 +117,25 @@ const placeOrder = async (req, res) => {
       return res.status(500).json({ message: "Failed to place order" });
     }
 
-    // Decrement stock for each product
+    // Decrement stock for each product (variant-level and product-level)
     for (const item of cart.products) {
       const productId = item.productId._id || item.productId;
-      await Product.findByIdAndUpdate(productId, {
-        $inc: { stock: -item.quantity },
-      });
+      if (item.variantId) {
+        // Decrement variant stock and product total stock
+        await Product.findOneAndUpdate(
+          { _id: productId, "variants._id": item.variantId },
+          {
+            $inc: {
+              "variants.$.stock": -item.quantity,
+              stock: -item.quantity,
+            },
+          }
+        );
+      } else {
+        await Product.findByIdAndUpdate(productId, {
+          $inc: { stock: -item.quantity },
+        });
+      }
     }
 
     // Clear the cart after successful order placement
@@ -116,7 +144,7 @@ const placeOrder = async (req, res) => {
     // Populate product details for the response
     const populatedOrder = await Order.findById(savedOrder._id).populate(
       "products.productId",
-      "name price image discount stock"
+      "name price image discount stock variants"
     );
 
     return res

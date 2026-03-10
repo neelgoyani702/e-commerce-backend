@@ -35,7 +35,7 @@ const createUser = async (req, res) => {
     const options = {
       httpOnly: true,
       secure: true,
-      maxAge: 3600 * 24 * 7,
+      maxAge: 1000 * 60 * 60 * 24, // 24 hours
       sameSite: "strict",
     };
 
@@ -78,7 +78,7 @@ const loginUser = async (req, res) => {
     const options = {
       httpOnly: true,
       secure: true,
-      maxAge: 3600 * 24 * 7,
+      maxAge: 1000 * 60 * 60 * 24, // 24 hours
       sameSite: "strict",
     };
 

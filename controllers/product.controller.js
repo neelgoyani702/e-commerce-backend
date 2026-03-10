@@ -49,6 +49,19 @@ function parseBulletPoints(bp) {
   return [];
 }
 
+// Parse variants from FormData (JSON string or array)
+function parseVariants(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') {
+    try {
+      const parsed = JSON.parse(v);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  }
+  return [];
+}
+
 const createProduct = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
@@ -59,7 +72,7 @@ const createProduct = async (req, res) => {
       return res.status(403).json({ message: "Admin access required" });
     }
 
-    let { name, description, price, category, bulletPoints, size, stock, discount, featured } = req.body;
+    let { name, description, price, category, bulletPoints, variants, stock, discount, featured } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: "Product name is required" });
@@ -73,27 +86,48 @@ const createProduct = async (req, res) => {
       return res.status(400).json({ message: "Category is required" });
     }
 
-    category = category.toLowerCase();
-    const categoryExist = await Category.findOne({ name: category });
+    // Support both category ID and category name
+    let categoryExist;
+    if (category.match(/^[0-9a-fA-F]{24}$/)) {
+      categoryExist = await Category.findById(category);
+    } else {
+      category = category.toLowerCase();
+      categoryExist = await Category.findOne({ name: category });
+    }
 
     if (!categoryExist) {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    const productImagePath = req.file?.path;
-    if (!productImagePath) {
-      return res.status(400).json({ message: "Product image is required" });
+    // Handle multiple image uploads
+    const files = req.files || [];
+    if (files.length === 0) {
+      return res.status(400).json({ message: "At least one product image is required" });
     }
 
-    const productImageURL = await uploadOnCloudinary(productImagePath);
+    const imageUrls = [];
+    for (const file of files) {
+      const uploadResult = await uploadOnCloudinary(file.path);
+      if (uploadResult && uploadResult.url) {
+        imageUrls.push(uploadResult.url);
+      }
+      // Clean up temp file
+      if (fs.existsSync(file.path)) {
+        fs.unlinkSync(file.path);
+      }
+    }
 
-    if (!productImageURL) {
+    if (imageUrls.length === 0) {
       return res.status(400).json({ message: "Product image upload failed" });
     }
 
-    // Clean up temp file
-    if (fs.existsSync(productImagePath)) {
-      fs.unlinkSync(productImagePath);
+    // Parse variants
+    const parsedVariants = parseVariants(variants);
+
+    // Auto-calculate stock from variants if they exist
+    let totalStock = stock ? Number(stock) : 0;
+    if (parsedVariants.length > 0) {
+      totalStock = parsedVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
     }
 
     const product = new Product({
@@ -102,9 +136,17 @@ const createProduct = async (req, res) => {
       price: Number(price),
       category: categoryExist._id,
       bulletPoints: parseBulletPoints(bulletPoints),
-      image: productImageURL.url,
-      size,
-      stock: stock ? Number(stock) : 0,
+      image: imageUrls[0],
+      images: imageUrls,
+      variants: parsedVariants.map(v => ({
+        size: v.size || undefined,
+        color: v.color || undefined,
+        colorCode: v.colorCode || undefined,
+        stock: Number(v.stock) || 0,
+        priceOverride: v.priceOverride ? Number(v.priceOverride) : null,
+        sku: v.sku || undefined,
+      })),
+      stock: totalStock,
       discount: discount ? Number(discount) : 0,
       featured: featured === true || featured === "true",
     });
@@ -193,8 +235,8 @@ const updateProduct = async (req, res) => {
       return res.status(403).json({ message: "Admin access required" });
     }
 
-    let { name, description, price, bulletPoints, size, stock, discount, featured } = req.body;
-    const productImagePath = req.file?.path;
+    let { name, description, price, category, bulletPoints, variants, stock, discount, featured, removeImages } = req.body;
+    const files = req.files || [];
 
     const product = await Product.findById(req.params.id)
       .populate("category", "name")
@@ -204,38 +246,77 @@ const updateProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // Update image if provided
-    if (productImagePath) {
-      const productImageURL = await uploadOnCloudinary(productImagePath);
+    // Ensure images array is populated (backward compat for old products)
+    if (!product.images || product.images.length === 0) {
+      product.images = product.image ? [product.image] : [];
+    }
 
-      if (!productImageURL) {
-        return res
-          .status(400)
-          .json({ message: "Product image upload failed" });
-      }
-
-      // Delete old image
-      if (product.image) {
-        await deleteFromCloudinary(product.image);
-      }
-
-      product.image = productImageURL.url;
-
-      // Clean up temp file
-      if (fs.existsSync(productImagePath)) {
-        fs.unlinkSync(productImagePath);
+    // Remove specific images if requested
+    if (removeImages) {
+      const toRemove = typeof removeImages === "string" ? JSON.parse(removeImages) : removeImages;
+      for (const imgUrl of toRemove) {
+        await deleteFromCloudinary(imgUrl);
+        product.images = product.images.filter((img) => img !== imgUrl);
       }
     }
+
+    // Upload new images if provided
+    if (files.length > 0) {
+      for (const file of files) {
+        const uploadResult = await uploadOnCloudinary(file.path);
+        if (uploadResult && uploadResult.url) {
+          product.images.push(uploadResult.url);
+        }
+        if (fs.existsSync(file.path)) {
+          fs.unlinkSync(file.path);
+        }
+      }
+    }
+
+    // Update the primary image to the first in the array
+    product.image = product.images.length > 0 ? product.images[0] : product.image;
 
     // Update fields if provided
     if (name && name.trim()) product.name = name.trim();
     if (description !== undefined) product.description = description.trim();
     if (price && !isNaN(price) && Number(price) > 0) product.price = Number(price);
     if (bulletPoints) product.bulletPoints = parseBulletPoints(bulletPoints);
-    if (size) product.size = size;
-    if (stock !== undefined) product.stock = Number(stock);
     if (discount !== undefined) product.discount = Number(discount);
     if (featured !== undefined) product.featured = featured === true || featured === "true";
+
+    // Handle variants update
+    if (variants !== undefined) {
+      const parsedVariants = parseVariants(variants);
+      product.variants = parsedVariants.map(v => ({
+        size: v.size || undefined,
+        color: v.color || undefined,
+        colorCode: v.colorCode || undefined,
+        stock: Number(v.stock) || 0,
+        priceOverride: v.priceOverride ? Number(v.priceOverride) : null,
+        sku: v.sku || undefined,
+      }));
+      // Auto-calculate total stock from variants
+      if (parsedVariants.length > 0) {
+        product.stock = parsedVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+      } else if (stock !== undefined) {
+        product.stock = Number(stock);
+      }
+    } else if (stock !== undefined) {
+      product.stock = Number(stock);
+    }
+
+    // Update category if provided (supports both ID and name)
+    if (category) {
+      let categoryExist;
+      if (category.match(/^[0-9a-fA-F]{24}$/)) {
+        categoryExist = await Category.findById(category);
+      } else {
+        categoryExist = await Category.findOne({ name: category.toLowerCase() });
+      }
+      if (categoryExist) {
+        product.category = categoryExist._id;
+      }
+    }
 
     const updatedProduct = await product.save();
 
@@ -270,9 +351,10 @@ const deleteProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // Delete image from cloudinary
-    if (product.image) {
-      await deleteFromCloudinary(product.image);
+    // Delete all images from cloudinary
+    const allImages = product.images?.length > 0 ? product.images : (product.image ? [product.image] : []);
+    for (const imgUrl of allImages) {
+      await deleteFromCloudinary(imgUrl);
     }
 
     await logActivity(req.user._id, "product_deleted", "product", product._id, product.name, "Product deleted");

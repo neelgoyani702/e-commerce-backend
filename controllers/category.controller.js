@@ -18,10 +18,22 @@ const createCategory = async (req, res) => {
       return res.status(403).json({ message: "Admin access required" });
     }
 
-    const { name } = req.body;
+    const { name, parentId } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: "Category name is required" });
+    }
+
+    // If parentId provided, validate it exists
+    if (parentId) {
+      const parentCategory = await Category.findById(parentId);
+      if (!parentCategory) {
+        return res.status(404).json({ message: "Parent category not found" });
+      }
+      // Enforce max 2 levels (no sub-sub-categories)
+      if (parentCategory.parentId) {
+        return res.status(400).json({ message: "Cannot create sub-category under another sub-category. Maximum depth is 2 levels." });
+      }
     }
 
     const categoryImagePath = req.file?.path;
@@ -38,6 +50,7 @@ const createCategory = async (req, res) => {
     const category = new Category({
       name: name.trim(),
       image: categoryImageURL.url,
+      parentId: parentId || null,
     });
 
     const savedCategory = await category.save();
@@ -47,10 +60,11 @@ const createCategory = async (req, res) => {
       fs.unlinkSync(categoryImagePath);
     }
 
-    await logActivity(req.user._id, "category_created", "category", savedCategory._id, savedCategory.name, "Category created");
+    const label = parentId ? "Sub-category created" : "Category created";
+    await logActivity(req.user._id, "category_created", "category", savedCategory._id, savedCategory.name, label);
 
     res.status(201).json({
-      message: "Category created successfully",
+      message: `${parentId ? "Sub-category" : "Category"} created successfully`,
       category: savedCategory,
     });
   } catch (error) {
@@ -63,11 +77,20 @@ const createCategory = async (req, res) => {
 const getCategory = async (req, res) => {
   try {
     const filter = {};
+
+    // Filter by active status
     if (req.query.active === "true") {
-      // Use $ne: false to include documents where isActive doesn't exist (old data)
       filter.isActive = { $ne: false };
     }
-    const categories = await Category.find(filter);
+
+    // Filter by parent: ?parent=null for top-level, ?parent=<id> for sub-categories
+    if (req.query.parent === "null" || req.query.parent === "top") {
+      filter.parentId = null;
+    } else if (req.query.parent) {
+      filter.parentId = req.query.parent;
+    }
+
+    const categories = await Category.find(filter).populate("parentId", "name");
     res.status(200).json({ message: "Category fetched successfully", categories: categories });
   } catch (error) {
     res
@@ -76,20 +99,55 @@ const getCategory = async (req, res) => {
   }
 };
 
+const getSubCategories = async (req, res) => {
+  try {
+    const filter = { parentId: req.params.id };
+
+    if (req.query.active === "true") {
+      filter.isActive = { $ne: false };
+    }
+
+    const subCategories = await Category.find(filter);
+    const parentCategory = await Category.findById(req.params.id).select("name image");
+
+    res.status(200).json({
+      message: "Sub-categories fetched successfully",
+      subCategories,
+      parentCategory,
+    });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ error: error.message, message: "Error fetching sub-categories" });
+  }
+};
+
 const getCategoryProducts = async (req, res) => {
   try {
-    const category = await Category.findById(req.params.id).select("-__v");
+    const category = await Category.findById(req.params.id).select("-__v").populate("parentId", "name image");
 
     if (!category) {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    const products = await Product.find({ category: req.params.id }).select("-__v");
+    // Check if this category has sub-categories
+    const subCategories = await Category.find({ parentId: req.params.id, isActive: { $ne: false } });
+
+    let products;
+    if (subCategories.length > 0) {
+      // If it has sub-categories, return products from ALL sub-categories + this category
+      const allCategoryIds = [req.params.id, ...subCategories.map(sc => sc._id)];
+      products = await Product.find({ category: { $in: allCategoryIds } }).select("-__v");
+    } else {
+      // No sub-categories, return products directly
+      products = await Product.find({ category: req.params.id }).select("-__v");
+    }
 
     return res.status(200).json({
       message: "Category products fetched successfully",
       products: products,
       category: category,
+      subCategories: subCategories,
     });
   } catch (error) {
     res
@@ -114,12 +172,15 @@ const updateCategory = async (req, res) => {
     }
 
     // Update name if provided
-    const { name, isActive } = req.body;
+    const { name, isActive, parentId } = req.body;
     if (name && name.trim()) {
       category.name = name.trim();
     }
     if (isActive !== undefined) {
       category.isActive = isActive === true || isActive === "true";
+    }
+    if (parentId !== undefined) {
+      category.parentId = parentId || null;
     }
 
     // Update image if provided
@@ -179,10 +240,24 @@ const deleteCategory = async (req, res) => {
       await deleteFromCloudinary(deletedCategory.image);
     }
 
+    // Find and delete all sub-categories
+    const subCategories = await Category.find({ parentId: req.params.id });
+    for (const sub of subCategories) {
+      if (sub.image) await deleteFromCloudinary(sub.image);
+      // Delete products in sub-category
+      await Product.deleteMany({ category: sub._id });
+    }
+    await Category.deleteMany({ parentId: req.params.id });
+
     // Also delete all products in this category
     await Product.deleteMany({ category: req.params.id });
 
-    await logActivity(req.user._id, "category_deleted", "category", deletedCategory._id, deletedCategory.name, "Category and associated products deleted");
+    const subCount = subCategories.length;
+    const detail = subCount > 0
+      ? `Category, ${subCount} sub-categories, and associated products deleted`
+      : "Category and associated products deleted";
+
+    await logActivity(req.user._id, "category_deleted", "category", deletedCategory._id, deletedCategory.name, detail);
 
     res
       .status(200)
@@ -194,4 +269,4 @@ const deleteCategory = async (req, res) => {
   }
 };
 
-export { getCategory, createCategory, updateCategory, deleteCategory, getCategoryProducts };
+export { getCategory, createCategory, updateCategory, deleteCategory, getCategoryProducts, getSubCategories };
