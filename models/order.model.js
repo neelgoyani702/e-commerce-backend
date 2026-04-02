@@ -9,8 +9,44 @@ const orderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["order placed", "delivered", "cancelled"],
+      enum: [
+        "order placed",
+        "confirmed",
+        "packed",
+        "shipped",
+        "out for delivery",
+        "delivered",
+        "cancelled",
+      ],
       default: "order placed",
+    },
+    statusHistory: [
+      {
+        status: { type: String, required: true },
+        timestamp: { type: Date, default: Date.now },
+        note: { type: String, default: "" },
+      },
+    ],
+    estimatedDelivery: {
+      type: Date,
+      default: null,
+    },
+    subTotal: {
+      type: Number,
+      required: true,
+      default: 0,
+    },
+    regularDiscount: {
+      type: Number,
+      default: 0,
+    },
+    flashSaleDiscount: {
+      type: Number,
+      default: 0,
+    },
+    bundleDiscount: {
+      type: Number,
+      default: 0,
     },
     totalAmount: {
       type: Number,

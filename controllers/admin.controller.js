@@ -313,14 +313,23 @@ const updateUserRole = async (req, res) => {
   }
 };
 
+// Valid forward status transitions
+const VALID_TRANSITIONS = {
+  "order placed": ["confirmed", "cancelled"],
+  "confirmed": ["packed", "cancelled"],
+  "packed": ["shipped", "cancelled"],
+  "shipped": ["out for delivery", "cancelled"],
+  "out for delivery": ["delivered"],
+  "delivered": [],
+  "cancelled": [],
+};
+
 const updateOrderStatus = async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, note, estimatedDelivery } = req.body;
 
-    if (!status || !["order placed", "delivered", "cancelled"].includes(status)) {
-      return res.status(400).json({
-        message: "Status must be 'order placed', 'delivered', or 'cancelled'",
-      });
+    if (!status) {
+      return res.status(400).json({ message: "Status is required" });
     }
 
     const order = await Order.findById(req.params.id);
@@ -329,29 +338,42 @@ const updateOrderStatus = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    if (order.status === "delivered" && status !== "delivered") {
-      return res
-        .status(400)
-        .json({ message: "Delivered orders cannot be changed" });
+    // Validate transition
+    const allowedNext = VALID_TRANSITIONS[order.status] || [];
+    if (!allowedNext.includes(status)) {
+      return res.status(400).json({
+        message: `Cannot transition from "${order.status}" to "${status}". Allowed: ${allowedNext.join(", ") || "none"}`,
+      });
     }
 
-    if (order.status === "cancelled" && status !== "cancelled") {
-      return res
-        .status(400)
-        .json({ message: "Cancelled orders cannot be changed" });
-    }
-
-    // Restore stock when cancelling (only if not already cancelled)
+    // Restore stock when cancelling (variant-aware)
     if (status === "cancelled" && order.status !== "cancelled") {
       for (const item of order.products) {
         const productId = item.productId._id || item.productId;
-        await Product.findByIdAndUpdate(productId, {
-          $inc: { stock: item.quantity },
-        });
+        if (item.variantId) {
+          await Product.findOneAndUpdate(
+            { _id: productId, "variants._id": item.variantId },
+            { $inc: { "variants.$.stock": item.quantity, stock: item.quantity } }
+          );
+        } else {
+          await Product.findByIdAndUpdate(productId, {
+            $inc: { stock: item.quantity },
+          });
+        }
       }
     }
 
     order.status = status;
+    order.statusHistory.push({
+      status,
+      timestamp: new Date(),
+      note: note || "",
+    });
+
+    if (estimatedDelivery) {
+      order.estimatedDelivery = new Date(estimatedDelivery);
+    }
+
     const updatedOrder = await order.save();
 
     await logActivity(
@@ -360,8 +382,12 @@ const updateOrderStatus = async (req, res) => {
       "order",
       order._id,
       `#${order._id.toString().slice(-8).toUpperCase()}`,
-      `Status changed to ${status}`
+      `Status changed to ${status}${note ? ` — ${note}` : ""}`
     );
+
+    // Populate for response
+    await updatedOrder.populate("userId", "firstName lastName email image");
+    await updatedOrder.populate("products.productId", "name price image discount stock variants");
 
     return res
       .status(200)
@@ -576,6 +602,280 @@ const deleteCoupon = async (req, res) => {
   }
 };
 
+// #15 — Sales Reports & Analytics
+const getSalesReports = async (req, res) => {
+  try {
+    const { range = "30d" } = req.query; // 7d, 30d, ytd, all
+    const now = new Date();
+    let startDate = new Date();
+
+    if (range === "7d") {
+      startDate.setDate(now.getDate() - 7);
+    } else if (range === "30d") {
+      startDate.setDate(now.getDate() - 30);
+    } else if (range === "ytd") {
+      startDate = new Date(now.getFullYear(), 0, 1);
+    } else {
+      startDate = new Date(2000, 0, 1); // effectively all time
+    }
+
+    startDate.setHours(0, 0, 0, 0);
+
+    const matchStage = {
+      $match: {
+        createdAt: { $gte: startDate },
+        status: { $ne: "cancelled" },
+      },
+    };
+
+    // 1. Time Series Revenue
+    // Group by Date for 7d / 30d, Group by Month for YTD / all
+    const isDaily = range === "7d" || range === "30d";
+    const groupId = isDaily
+      ? { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }
+      : { $dateToString: { format: "%Y-%m", date: "$createdAt" } };
+
+    const timeSeriesData = await Order.aggregate([
+      matchStage,
+      {
+        $group: {
+          _id: groupId,
+          revenue: { $sum: "$totalAmount" },
+          orders: { $sum: 1 },
+          discounts: { 
+            $sum: { 
+              $add: [
+                "$regularDiscount", 
+                "$flashSaleDiscount", 
+                "$bundleDiscount", 
+                "$couponDiscount"
+              ] 
+            } 
+          }
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // Format for recharts
+    const chartData = timeSeriesData.map(item => ({
+      date: item._id,
+      revenue: item.revenue,
+      orders: item.orders,
+      discounts: item.discounts
+    }));
+
+    // 2. Key Metrics Summary
+    const summaryData = await Order.aggregate([
+      matchStage,
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: "$totalAmount" },
+          totalOrders: { $sum: 1 },
+          totalDiscounts: {
+            $sum: {
+              $add: [
+                "$regularDiscount", 
+                "$flashSaleDiscount", 
+                "$bundleDiscount", 
+                "$couponDiscount"
+              ]
+            }
+          }
+        }
+      }
+    ]);
+    const summary = summaryData[0] || { totalRevenue: 0, totalOrders: 0, totalDiscounts: 0 };
+    summary.aov = summary.totalOrders > 0 ? Math.round(summary.totalRevenue / summary.totalOrders) : 0;
+
+    // 3. Top Categories (requires lookup of product -> category)
+    const categoryData = await Order.aggregate([
+      matchStage,
+      { $unwind: "$products" },
+      {
+        $lookup: {
+          from: "products",
+          localField: "products.productId",
+          foreignField: "_id",
+          as: "productDoc"
+        }
+      },
+      { $unwind: "$productDoc" },
+      {
+        $lookup: {
+          from: "categories",
+          localField: "productDoc.category",
+          foreignField: "_id",
+          as: "categoryDoc"
+        }
+      },
+      { $unwind: "$categoryDoc" },
+      {
+        $group: {
+          _id: "$categoryDoc.name",
+          revenue: { $sum: { $multiply: ["$products.price", 1] } }, // Since price is final item price, we can use it directly as revenue approx
+          unitsSold: { $sum: "$products.quantity" }
+        }
+      },
+      { $sort: { revenue: -1 } },
+      { $limit: 6 }
+    ]);
+
+    const formattedCategories = categoryData.map(c => ({
+      name: c._id,
+      revenue: c.revenue,
+      unitsSold: c.unitsSold
+    }));
+
+    return res.status(200).json({
+      message: "Sales reports fetched",
+      summary,
+      chartData,
+      topCategories: formattedCategories
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message, message: "Error fetching sales reports" });
+  }
+};
+
+// #16 — Customer Segmentation
+const getCustomerSegments = async (req, res) => {
+  try {
+    const now = new Date();
+    const ninetyDaysAgo = new Date(now);
+    ninetyDaysAgo.setDate(now.getDate() - 90);
+    const thirtyDaysAgo = new Date(now);
+    thirtyDaysAgo.setDate(now.getDate() - 30);
+
+    // Get all users with order stats
+    const usersWithOrders = await Order.aggregate([
+      { $match: { status: { $ne: "cancelled" } } },
+      {
+        $group: {
+          _id: "$userId",
+          totalSpent: { $sum: "$totalAmount" },
+          orderCount: { $sum: 1 },
+          lastOrderDate: { $max: "$createdAt" },
+          avgOrderValue: { $avg: "$totalAmount" },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "user",
+        },
+      },
+      { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          firstName: "$user.firstName",
+          lastName: "$user.lastName",
+          email: "$user.email",
+          image: "$user.image",
+          createdAt: "$user.createdAt",
+          totalSpent: 1,
+          orderCount: 1,
+          lastOrderDate: 1,
+          avgOrderValue: { $round: ["$avgOrderValue", 0] },
+        },
+      },
+      { $sort: { totalSpent: -1 } },
+    ]);
+
+    // Get users with no orders
+    const userIdsWithOrders = usersWithOrders.map((u) => u._id);
+    const usersWithoutOrders = await User.find({
+      _id: { $nin: userIdsWithOrders },
+    })
+      .select("firstName lastName email image createdAt")
+      .lean();
+
+    // Classify segments
+    // VIP: top 20% spenders OR spent > 50000
+    // Regular: has ordered in last 90 days
+    // At-Risk: hasn't ordered in 90+ days but has ordered before
+    // New: registered but never ordered
+    const vipThreshold = Math.max(
+      50000,
+      usersWithOrders.length > 0
+        ? usersWithOrders[Math.floor(usersWithOrders.length * 0.2)]?.totalSpent || 50000
+        : 50000
+    );
+
+    const segments = {
+      vip: [],
+      regular: [],
+      atRisk: [],
+      new: [],
+    };
+
+    for (const u of usersWithOrders) {
+      const customer = {
+        _id: u._id,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        email: u.email,
+        image: u.image,
+        totalSpent: u.totalSpent,
+        orderCount: u.orderCount,
+        avgOrderValue: u.avgOrderValue,
+        lastOrderDate: u.lastOrderDate,
+      };
+
+      if (u.totalSpent >= vipThreshold) {
+        customer.segment = "vip";
+        segments.vip.push(customer);
+      } else if (u.lastOrderDate >= ninetyDaysAgo) {
+        customer.segment = "regular";
+        segments.regular.push(customer);
+      } else {
+        customer.segment = "atRisk";
+        segments.atRisk.push(customer);
+      }
+    }
+
+    for (const u of usersWithoutOrders) {
+      segments.new.push({
+        _id: u._id,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        email: u.email,
+        image: u.image,
+        totalSpent: 0,
+        orderCount: 0,
+        avgOrderValue: 0,
+        lastOrderDate: null,
+        segment: "new",
+        createdAt: u.createdAt,
+      });
+    }
+
+    return res.status(200).json({
+      message: "Customer segments fetched",
+      segments,
+      summary: {
+        vip: segments.vip.length,
+        regular: segments.regular.length,
+        atRisk: segments.atRisk.length,
+        new: segments.new.length,
+        total:
+          segments.vip.length +
+          segments.regular.length +
+          segments.atRisk.length +
+          segments.new.length,
+        vipThreshold,
+      },
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error fetching customer segments" });
+  }
+};
+
 export {
   getDashboardStats,
   getAllUsers,
@@ -589,4 +889,6 @@ export {
   createCoupon,
   updateCoupon,
   deleteCoupon,
+  getSalesReports,
+  getCustomerSegments,
 };

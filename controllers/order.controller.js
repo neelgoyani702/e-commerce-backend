@@ -2,13 +2,15 @@ import Order from "../models/order.model.js";
 import Cart from "../models/cart.model.js";
 import Product from "../models/products.model.js";
 import Coupon from "../models/coupon.model.js";
+import FlashSale from "../models/flashSale.model.js";
 
 const getOrders = async (req, res) => {
   try {
     const orders = await Order.find({
       userId: req.user._id,
-      status: "order placed",
-    }).populate("products.productId", "name price image discount stock");
+      status: { $nin: ["delivered", "cancelled"] },
+    }).populate("products.productId", "name price image discount stock")
+      .sort({ createdAt: -1 });
 
     return res
       .status(200)
@@ -72,6 +74,53 @@ const placeOrder = async (req, res) => {
       });
     }
 
+    // Calculate detailed discount breakdown
+    const now = new Date();
+    const activeFlashSales = await FlashSale.find({
+      isActive: true,
+      startDate: { $lte: now },
+      endDate: { $gt: now },
+    });
+
+    let subTotal = 0;
+    let regularDiscount = 0;
+    let flashSaleDiscount = 0;
+    let bundleDiscount = 0;
+
+    for (const item of cart.products) {
+      const product = await Product.findById(item.productId._id || item.productId);
+      const variant = item.variantId ? product.variants?.id(item.variantId) : null;
+      
+      const basePrice = (variant?.priceOverride != null) ? variant.priceOverride : product.price;
+      subTotal += basePrice * item.quantity;
+
+      let inFlashSale = false;
+      let currentBestPrice = basePrice;
+      
+      for (const sale of activeFlashSales) {
+        const productInSale = sale.products.find(
+          (p) => p.product.toString() === product._id.toString()
+        );
+        if (productInSale) {
+          flashSaleDiscount += (basePrice - productInSale.salePrice) * item.quantity;
+          currentBestPrice = productInSale.salePrice;
+          inFlashSale = true;
+          break;
+        }
+      }
+
+      if (!inFlashSale && product.discount > 0) {
+        const discountedPrice = Math.round(basePrice - (basePrice * product.discount / 100));
+        regularDiscount += (basePrice - discountedPrice) * item.quantity;
+        currentBestPrice = discountedPrice;
+      }
+
+      const expectedBeforeBundle = currentBestPrice * item.quantity;
+      if (item.price < expectedBeforeBundle) {
+        bundleDiscount += (expectedBeforeBundle - item.price);
+      }
+    }
+
     // Handle coupon validation and discount
     let couponDiscount = 0;
     let appliedCouponCode = null;
@@ -105,10 +154,15 @@ const placeOrder = async (req, res) => {
     const order = new Order({
       userId: req.user._id,
       totalItems: cart.totalItems,
+      subTotal,
+      regularDiscount,
+      flashSaleDiscount,
+      bundleDiscount,
       totalAmount: finalAmount,
       couponCode: appliedCouponCode,
       couponDiscount,
       products: cart.products,
+      statusHistory: [{ status: "order placed", timestamp: new Date(), note: "Order placed successfully" }],
     });
 
     const savedOrder = await order.save();
@@ -178,15 +232,23 @@ const cancelOrder = async (req, res) => {
       return res.status(400).json({ message: "Delivered orders cannot be cancelled" });
     }
 
-    // Restore stock for each product
+    // Restore stock for each product (variant-aware)
     for (const item of order.products) {
       const productId = item.productId._id || item.productId;
-      await Product.findByIdAndUpdate(productId, {
-        $inc: { stock: item.quantity },
-      });
+      if (item.variantId) {
+        await Product.findOneAndUpdate(
+          { _id: productId, "variants._id": item.variantId },
+          { $inc: { "variants.$.stock": item.quantity, stock: item.quantity } }
+        );
+      } else {
+        await Product.findByIdAndUpdate(productId, {
+          $inc: { stock: item.quantity },
+        });
+      }
     }
 
     order.status = "cancelled";
+    order.statusHistory.push({ status: "cancelled", timestamp: new Date(), note: req.body?.note || "Order cancelled by customer" });
     const updatedOrder = await order.save();
 
     return res
@@ -199,10 +261,27 @@ const cancelOrder = async (req, res) => {
   }
 };
 
-const deliveredOrder = async (req, res) => {
+// Valid forward status transitions
+const VALID_TRANSITIONS = {
+  "order placed": ["confirmed", "cancelled"],
+  "confirmed": ["packed", "cancelled"],
+  "packed": ["shipped", "cancelled"],
+  "shipped": ["out for delivery", "cancelled"],
+  "out for delivery": ["delivered"],
+  "delivered": [],
+  "cancelled": [],
+};
+
+const updateOrderStatus = async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const { status, note, estimatedDelivery } = req.body;
+
+    if (!status) {
+      return res.status(400).json({ message: "Status is required" });
     }
 
     const order = await Order.findById(req.params.id);
@@ -211,24 +290,38 @@ const deliveredOrder = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    if (order.status === "delivered") {
-      return res.status(400).json({ message: "Order is already delivered" });
+    // Validate transition
+    const allowedNext = VALID_TRANSITIONS[order.status] || [];
+    if (!allowedNext.includes(status)) {
+      return res.status(400).json({
+        message: `Cannot transition from "${order.status}" to "${status}". Allowed: ${allowedNext.join(", ") || "none"}`,
+      });
     }
 
-    if (order.status === "cancelled") {
-      return res.status(400).json({ message: "Cancelled orders cannot be delivered" });
+    order.status = status;
+    order.statusHistory.push({
+      status,
+      timestamp: new Date(),
+      note: note || "",
+    });
+
+    if (estimatedDelivery) {
+      order.estimatedDelivery = new Date(estimatedDelivery);
     }
 
-    order.status = "delivered";
     const updatedOrder = await order.save();
+
+    // Populate for response
+    await updatedOrder.populate("userId", "firstName lastName email image");
+    await updatedOrder.populate("products.productId", "name price image discount stock variants");
 
     return res
       .status(200)
-      .json({ message: "Order delivered successfully", updatedOrder });
+      .json({ message: `Order status updated to "${status}"`, updatedOrder });
   } catch (error) {
     return res
       .status(500)
-      .json({ error: error.message, message: "Error delivering order" });
+      .json({ error: error.message, message: "Error updating order status" });
   }
 };
 
@@ -273,7 +366,7 @@ export {
   getOrders,
   placeOrder,
   cancelOrder,
-  deliveredOrder,
+  updateOrderStatus,
   orderHistory,
   getAllOrders,
 };

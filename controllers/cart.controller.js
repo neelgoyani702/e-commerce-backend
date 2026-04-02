@@ -1,13 +1,113 @@
 import Cart from "../models/cart.model.js";
 import Product from "../models/products.model.js";
+import FlashSale from "../models/flashSale.model.js";
+import Bundle from "../models/bundle.model.js";
 
-// Helper: compute discounted unit price (supports variant priceOverride)
-function getEffectivePrice(product, variant) {
-  const basePrice = (variant?.priceOverride != null) ? variant.priceOverride : product.price;
-  if (product.discount > 0) {
-    return Math.round(basePrice - (basePrice * product.discount / 100));
+async function getActiveFlashSales() {
+  const now = new Date();
+  return await FlashSale.find({
+    isActive: true,
+    startDate: { $lte: now },
+    endDate: { $gt: now },
+  });
+}
+
+async function getActiveBundles() {
+  return await Bundle.find({ isActive: true });
+}
+
+function getBundleDiscount(productId, cartProducts, activeBundles) {
+  let maxDiscount = 0;
+  for (const bundle of activeBundles) {
+    const bundleProductIds = [
+      bundle.mainProduct.toString(),
+      ...bundle.additionalProducts.map((id) => id.toString()),
+    ];
+
+    if (bundleProductIds.includes(productId.toString())) {
+      const cartProductIds = cartProducts.map((p) =>
+        (p.productId?._id || p.productId).toString()
+      );
+
+      const isBundleComplete = bundleProductIds.every((id) =>
+        cartProductIds.includes(id)
+      );
+
+      if (isBundleComplete && bundle.discountPercentage > maxDiscount) {
+        maxDiscount = bundle.discountPercentage;
+      }
+    }
   }
-  return basePrice;
+  return maxDiscount;
+}
+
+function getEffectivePrice(product, variant, activeFlashSales = [], bundleDiscountPct = 0) {
+  let basePrice = (variant?.priceOverride != null) ? variant.priceOverride : product.price;
+  let currentBestPrice = basePrice;
+  let inFlashSale = false;
+
+  for (const sale of activeFlashSales) {
+    const productInSale = sale.products.find(
+      (p) => p.product.toString() === product._id.toString()
+    );
+    if (productInSale) {
+      currentBestPrice = productInSale.salePrice;
+      inFlashSale = true;
+      break;
+    }
+  }
+
+  if (!inFlashSale && product.discount && product.discount > 0) {
+    currentBestPrice = Math.round(basePrice - (basePrice * product.discount / 100));
+  }
+
+  if (bundleDiscountPct > 0) {
+    currentBestPrice = Math.round(currentBestPrice - (currentBestPrice * bundleDiscountPct / 100));
+  }
+
+  return currentBestPrice;
+}
+
+async function recalculateCartPrices(cart) {
+  const activeFlashSales = await getActiveFlashSales();
+  const activeBundles = await getActiveBundles();
+
+  let changed = false;
+  for (const item of cart.products) {
+    if (!item.productId) continue;
+
+    let productDoc = item.productId;
+    if (!productDoc.price) {
+      productDoc = await Product.findById(item.productId);
+      if (!productDoc) continue;
+    }
+
+    const variant = item.variantId && productDoc.variants ? productDoc.variants.id(item.variantId) : null;
+    const bundleDiscount = getBundleDiscount(productDoc._id, cart.products, activeBundles);
+    const effectivePrice = getEffectivePrice(productDoc, variant, activeFlashSales, bundleDiscount);
+
+    const correctLinePrice = effectivePrice * item.quantity;
+    if (item.price !== correctLinePrice) {
+      item.price = correctLinePrice;
+      changed = true;
+    }
+
+    if (variant) {
+      const newLabel = buildVariantLabel(variant);
+      if (item.variantLabel !== newLabel) {
+        item.variantLabel = newLabel;
+        changed = true;
+      }
+    }
+  }
+
+  const computedTotal = cart.products.reduce((acc, p) => acc + p.price, 0);
+  if (cart.totalAmount !== computedTotal) {
+    cart.totalAmount = computedTotal;
+    changed = true;
+  }
+
+  return changed;
 }
 
 // Helper: build variant label string for display
@@ -39,30 +139,8 @@ const getCart = async (req, res) => {
       return res.status(200).json({ message: "Cart is empty", cart: { products: [], totalAmount: 0, totalItems: 0 } });
     }
 
-    // Recalculate prices based on current product data (discounts/variant prices may have changed)
-    let changed = false;
-    for (const item of cart.products) {
-      if (item.productId) {
-        const variant = item.variantId ? item.productId.variants?.id(item.variantId) : null;
-        const effectivePrice = getEffectivePrice(item.productId, variant);
-        const correctLinePrice = effectivePrice * item.quantity;
-        if (item.price !== correctLinePrice) {
-          item.price = correctLinePrice;
-          changed = true;
-        }
-        // Update variant label if variant still exists
-        if (variant) {
-          const newLabel = buildVariantLabel(variant);
-          if (item.variantLabel !== newLabel) {
-            item.variantLabel = newLabel;
-            changed = true;
-          }
-        }
-      }
-    }
-
-    if (changed) {
-      cart.totalAmount = cart.products.reduce((acc, p) => acc + p.price, 0);
+    const priceChanged = await recalculateCartPrices(cart);
+    if (priceChanged) {
       await cart.save();
     }
 
@@ -109,13 +187,13 @@ const addToCart = async (req, res) => {
       }
     }
 
-    // Check stock (variant-level or product-level)
     const availableStock = variant ? variant.stock : productDoc.stock;
     if (availableStock === 0) {
       return res.status(400).json({ message: "Product is out of stock" });
     }
 
-    const unitPrice = getEffectivePrice(productDoc, variant);
+    const activeFlashSales = await getActiveFlashSales();
+    const unitPrice = getEffectivePrice(productDoc, variant, activeFlashSales);
     const variantLabel = buildVariantLabel(variant);
     const cart = await Cart.findOne({ userId: req.user._id });
     let stockCapped = false;
@@ -169,6 +247,7 @@ const addToCart = async (req, res) => {
       cart.totalAmount = cart.products.reduce((acc, p) => acc + p.price, 0);
       cart.totalItems = cart.products.length;
 
+      await recalculateCartPrices(cart);
       await cart.save();
       const message = stockCapped ? cappedMessage : "Product added to cart";
       return res.status(201).json({ message, cart, stockCapped });
@@ -193,6 +272,9 @@ const addToCart = async (req, res) => {
       totalAmount: unitPrice * cappedQty,
       totalItems: 1,
     });
+    
+    await recalculateCartPrices(newCart);
+    await newCart.save();
 
     const message = stockCapped ? cappedMessage : "Product added to cart";
     return res
@@ -238,7 +320,8 @@ const updateCart = async (req, res) => {
     }
 
     const variant = variantId ? productDoc.variants?.id(variantId) : null;
-    const unitPrice = getEffectivePrice(productDoc, variant);
+    const activeFlashSales = await getActiveFlashSales();
+    const unitPrice = getEffectivePrice(productDoc, variant, activeFlashSales);
     const availableStock = variant ? variant.stock : productDoc.stock;
     const cappedQty = availableStock ? Math.min(Number(quantity), availableStock) : Number(quantity);
     existingItem.quantity = cappedQty;
@@ -247,6 +330,7 @@ const updateCart = async (req, res) => {
     cart.totalAmount = cart.products.reduce((acc, p) => acc + p.price, 0);
     cart.totalItems = cart.products.length;
 
+    await recalculateCartPrices(cart);
     await cart.save();
 
     return res.status(200).json({ message: "Cart updated successfully", cart });
@@ -289,6 +373,7 @@ const deleteCart = async (req, res) => {
     cart.totalAmount = cart.products.reduce((acc, p) => acc + p.price, 0);
     cart.totalItems = cart.products.length;
 
+    await recalculateCartPrices(cart);
     await cart.save();
 
     return res.status(200).json({ message: "Product removed from cart", cart });
@@ -299,4 +384,125 @@ const deleteCart = async (req, res) => {
   }
 };
 
-export { getCart, addToCart, updateCart, deleteCart };
+const reorderFromOrder = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    // Import Order model inline to avoid circular dependency issues
+    const { default: Order } = await import("../models/order.model.js");
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (order.userId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    if (order.status !== "delivered") {
+      return res.status(400).json({ message: "Only delivered orders can be reordered" });
+    }
+
+    let cart = await Cart.findOne({ userId: req.user._id });
+    const results = [];
+    let addedCount = 0;
+
+    for (const item of order.products) {
+      const productId = item.productId._id || item.productId;
+      const product = await Product.findById(productId);
+
+      if (!product) {
+        results.push({ name: "Unknown product", status: "unavailable" });
+        continue;
+      }
+
+      // Get variant and stock
+      let variant = null;
+      let availableStock = product.stock;
+      if (item.variantId && product.variants?.length > 0) {
+        variant = product.variants.id(item.variantId);
+        if (!variant) {
+          results.push({ name: product.name, status: "variant unavailable" });
+          continue;
+        }
+        availableStock = variant.stock;
+      }
+
+      if (availableStock === 0) {
+        results.push({ name: product.name, status: "out of stock" });
+        continue;
+      }
+
+      const activeFlashSales = await getActiveFlashSales();
+      const unitPrice = getEffectivePrice(product, variant, activeFlashSales);
+      const variantLabel = buildVariantLabel(variant);
+      const qty = Math.min(item.quantity, availableStock);
+
+      if (!cart) {
+        cart = await Cart.create({
+          userId: req.user._id,
+          products: [{
+            productId,
+            quantity: qty,
+            price: unitPrice * qty,
+            variantId: item.variantId || undefined,
+            variantLabel: variantLabel || undefined,
+          }],
+          totalAmount: unitPrice * qty,
+          totalItems: 1,
+        });
+      } else {
+        // Check if item already exists in cart
+        const existingItem = cart.products.find(
+          (p) => p.productId.toString() === productId.toString() &&
+            ((!p.variantId && !item.variantId) || (p.variantId?.toString() === item.variantId?.toString()))
+        );
+
+        if (existingItem) {
+          const newQty = Math.min(existingItem.quantity + qty, availableStock);
+          existingItem.quantity = newQty;
+          existingItem.price = newQty * unitPrice;
+        } else {
+          cart.products.push({
+            productId,
+            quantity: qty,
+            price: unitPrice * qty,
+            variantId: item.variantId || undefined,
+            variantLabel: variantLabel || undefined,
+          });
+        }
+
+        cart.totalAmount = cart.products.reduce((acc, p) => acc + p.price, 0);
+        cart.totalItems = cart.products.length;
+        await cart.save();
+      }
+
+      addedCount++;
+      results.push({
+        name: product.name,
+        status: qty < item.quantity ? "partial" : "added",
+        qty,
+      });
+    }
+
+    if (cart) {
+      await recalculateCartPrices(cart);
+      await cart.save();
+    }
+
+    return res.status(200).json({
+      message: addedCount > 0
+        ? `${addedCount} item${addedCount > 1 ? "s" : ""} added to cart`
+        : "No items could be added to cart",
+      results,
+      addedCount,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ error: error.message, message: "Error reordering" });
+  }
+};
+
+export { getCart, addToCart, updateCart, deleteCart, reorderFromOrder };
