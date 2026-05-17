@@ -3,6 +3,8 @@ import Product from "../models/products.model.js";
 import Category from "../models/category.model.js";
 import User from "../models/user.model.js";
 import ActivityLog from "../models/activityLog.model.js";
+import { sendEmail, orderConfirmedEmail, orderShippedEmail, orderOutForDeliveryEmail, orderDeliveredEmail, orderCancelledEmail } from "../services/mail.service.js";
+import { initiateRazorpayRefund } from "./payment.controller.js";
 
 // Helper to log admin activity
 const logActivity = async (userId, action, targetType, targetId, targetName, details) => {
@@ -219,6 +221,34 @@ const getDashboardStats = async (req, res) => {
     const thisMonth = thisMonthAgg[0] || { orders: 0, revenue: 0 };
     const lastMonth = lastMonthAgg[0] || { orders: 0, revenue: 0 };
 
+    // Payment stats aggregation
+    const paymentStatsAgg = await Order.aggregate([
+      {
+        $group: {
+          _id: null,
+          collected: {
+            $sum: { $cond: [{ $eq: ["$paymentStatus", "paid"] }, "$totalAmount", 0] },
+          },
+          refunded: {
+            $sum: { $cond: [{ $eq: ["$paymentStatus", "refunded"] }, "$totalAmount", 0] },
+          },
+          failed: {
+            $sum: { $cond: [{ $eq: ["$paymentStatus", "failed"] }, "$totalAmount", 0] },
+          },
+          pending: {
+            $sum: { $cond: [{ $eq: ["$paymentStatus", "pending"] }, "$totalAmount", 0] },
+          },
+          onlineOrders: {
+            $sum: { $cond: [{ $eq: ["$paymentMethod", "online"] }, 1, 0] },
+          },
+          codOrders: {
+            $sum: { $cond: [{ $eq: ["$paymentMethod", "cod"] }, 1, 0] },
+          },
+        },
+      },
+    ]);
+    const paymentStats = paymentStatsAgg[0] || { collected: 0, refunded: 0, failed: 0, pending: 0, onlineOrders: 0, codOrders: 0 };
+
     return res.status(200).json({
       message: "Dashboard stats fetched successfully",
       stats: {
@@ -232,6 +262,7 @@ const getDashboardStats = async (req, res) => {
           delivered: stats.delivered,
           cancelled: stats.cancelled,
         },
+        paymentStats,
         monthlyRevenue: monthlyData,
         recentOrders,
         topProducts,
@@ -361,6 +392,19 @@ const updateOrderStatus = async (req, res) => {
           });
         }
       }
+
+      // Auto-refund for online payments
+      if (order.paymentMethod === "online" && order.paymentStatus === "paid" && order.paymentId) {
+        const refundResult = await initiateRazorpayRefund(order.paymentId, order.totalAmount);
+        if (refundResult.success) {
+          order.paymentStatus = "refunded";
+        }
+      }
+    }
+
+    // Mark COD as paid when delivered
+    if (status === "delivered" && order.paymentMethod === "cod") {
+      order.paymentStatus = "paid";
     }
 
     order.status = status;
@@ -388,6 +432,24 @@ const updateOrderStatus = async (req, res) => {
     // Populate for response
     await updatedOrder.populate("userId", "firstName lastName email image");
     await updatedOrder.populate("products.productId", "name price image discount stock variants");
+
+    // Send status emails (non-blocking)
+    try {
+      const userEmail = updatedOrder.userId?.email;
+      if (userEmail) {
+        if (status === "confirmed") {
+          sendEmail(userEmail, `Order Confirmed #${order._id} ✅`, orderConfirmedEmail(updatedOrder, updatedOrder.userId));
+        } else if (status === "shipped") {
+          sendEmail(userEmail, `Your Order Has Been Shipped 🚚`, orderShippedEmail(updatedOrder, updatedOrder.userId));
+        } else if (status === "out for delivery") {
+          sendEmail(userEmail, `Your Order Is Out for Delivery 📍`, orderOutForDeliveryEmail(updatedOrder, updatedOrder.userId));
+        } else if (status === "delivered") {
+          sendEmail(userEmail, `Your Order Has Been Delivered 🎁`, orderDeliveredEmail(updatedOrder, updatedOrder.userId));
+        } else if (status === "cancelled") {
+          sendEmail(userEmail, `Order Cancelled #${order._id}`, orderCancelledEmail(updatedOrder, updatedOrder.userId, "admin"));
+        }
+      }
+    } catch { /* non-fatal */ }
 
     return res
       .status(200)
@@ -876,6 +938,67 @@ const getCustomerSegments = async (req, res) => {
   }
 };
 
+// ─── Payment Transactions ────────────────────────────────────────────────────
+const getPaymentTransactions = async (req, res) => {
+  try {
+    const { paymentStatus, paymentMethod, search, page = 1, limit = 20 } = req.query;
+
+    // Build filter
+    const filter = {};
+    if (paymentStatus && paymentStatus !== "all") filter.paymentStatus = paymentStatus;
+    if (paymentMethod && paymentMethod !== "all") filter.paymentMethod = paymentMethod;
+    if (search) {
+      filter.$or = [
+        { _id: { $regex: search, $options: "i" } },
+        { paymentId: { $regex: search, $options: "i" } },
+        { razorpayOrderId: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [transactions, total] = await Promise.all([
+      Order.find(filter)
+        .populate("userId", "firstName lastName email image")
+        .select("_id status paymentMethod paymentStatus paymentId razorpayOrderId totalAmount createdAt updatedAt statusHistory")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      Order.countDocuments(filter),
+    ]);
+
+    // Summary stats (across all orders, not just filtered)
+    const summaryAgg = await Order.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalCollected: { $sum: { $cond: [{ $eq: ["$paymentStatus", "paid"] }, "$totalAmount", 0] } },
+          totalRefunded: { $sum: { $cond: [{ $eq: ["$paymentStatus", "refunded"] }, "$totalAmount", 0] } },
+          totalFailed: { $sum: { $cond: [{ $eq: ["$paymentStatus", "failed"] }, "$totalAmount", 0] } },
+          totalPending: { $sum: { $cond: [{ $eq: ["$paymentStatus", "pending"] }, "$totalAmount", 0] } },
+          onlineCount: { $sum: { $cond: [{ $eq: ["$paymentMethod", "online"] }, 1, 0] } },
+          codCount: { $sum: { $cond: [{ $eq: ["$paymentMethod", "cod"] }, 1, 0] } },
+          paidCount: { $sum: { $cond: [{ $eq: ["$paymentStatus", "paid"] }, 1, 0] } },
+          refundedCount: { $sum: { $cond: [{ $eq: ["$paymentStatus", "refunded"] }, 1, 0] } },
+          failedCount: { $sum: { $cond: [{ $eq: ["$paymentStatus", "failed"] }, 1, 0] } },
+          pendingCount: { $sum: { $cond: [{ $eq: ["$paymentStatus", "pending"] }, 1, 0] } },
+        },
+      },
+    ]);
+
+    const summary = summaryAgg[0] || {};
+
+    return res.status(200).json({
+      message: "Payment transactions fetched",
+      transactions,
+      total,
+      pages: Math.ceil(total / parseInt(limit)),
+      summary,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message, message: "Error fetching payment transactions" });
+  }
+};
+
 export {
   getDashboardStats,
   getAllUsers,
@@ -891,4 +1014,5 @@ export {
   deleteCoupon,
   getSalesReports,
   getCustomerSegments,
+  getPaymentTransactions,
 };

@@ -1,4 +1,6 @@
 import StockAlert from "../models/stockAlert.model.js";
+import Product from "../models/products.model.js";
+import { sendEmail, stockAlertEmail } from "../services/mail.service.js";
 
 // Create or subscribe to an alert
 const createAlert = async (req, res) => {
@@ -95,4 +97,29 @@ const getAlertCount = async (req, res) => {
   }
 };
 
-export { createAlert, getUserAlerts, deleteAlert, checkAlert, getAlertCount };
+// Notify all subscribers when product is back in stock
+const notifyStockSubscribers = async (productId) => {
+  try {
+    const alerts = await StockAlert.find({ productId, notified: false });
+    if (!alerts.length) return;
+
+    const product = await Product.findById(productId).select("name price image discount _id");
+    if (!product) return;
+
+    for (const alert of alerts) {
+      if (alert.email) {
+        sendEmail(
+          alert.email,
+          `🔔 ${product.name} is Back in Stock!`,
+          stockAlertEmail(product, alert.email)
+        );
+      }
+      alert.notified = true;
+      await alert.save();
+    }
+  } catch (err) {
+    console.error("[stockAlert] notify error:", err.message);
+  }
+};
+
+export { createAlert, getUserAlerts, deleteAlert, checkAlert, getAlertCount, notifyStockSubscribers };

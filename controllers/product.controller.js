@@ -8,6 +8,7 @@ import {
   deleteFromCloudinary,
 } from "../services/Cloudinary.service.js";
 import { logActivity } from "./admin.controller.js";
+import { notifyStockSubscribers } from "./stockAlert.controller.js";
 
 // Normalize bulletPoints from FormData — handles JSON strings, arrays, double-encoded, etc.
 function parseBulletPoints(bp) {
@@ -318,7 +319,13 @@ const updateProduct = async (req, res) => {
       }
     }
 
+    const oldStock = product.stock || 0;
     const updatedProduct = await product.save();
+
+    // If stock went from 0 to positive, notify back-in-stock subscribers
+    if (oldStock === 0 && updatedProduct.stock > 0) {
+      notifyStockSubscribers(updatedProduct._id);
+    }
 
     await logActivity(req.user._id, "product_updated", "product", updatedProduct._id, updatedProduct.name, "Product details updated");
 

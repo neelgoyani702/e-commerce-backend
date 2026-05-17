@@ -15,6 +15,7 @@ import {
   deleteCoupon,
   getSalesReports,
   getCustomerSegments,
+  getPaymentTransactions,
 } from "../controllers/admin.controller.js";
 import { getAllReturns, updateReturnStatus as updateReturn } from "../controllers/return.controller.js";
 
@@ -36,5 +37,6 @@ router.route("/returns").get(getAllReturns);
 router.route("/returns/:id/status").put(updateReturn);
 router.route("/reports/sales").get(getSalesReports);
 router.route("/customers/segments").get(getCustomerSegments);
+router.route("/payments").get(getPaymentTransactions);
 
 export default router;

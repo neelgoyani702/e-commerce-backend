@@ -1,69 +1,125 @@
-import Stripe from "stripe";
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+import Razorpay from "razorpay";
+import crypto from "crypto";
+import Order from "../models/order.model.js";
 
-const createCustomer = async (req, res) => {
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+/**
+ * POST /payment/create-order
+ * Creates a Razorpay order for the given amount (in INR paise).
+ * Body: { amount } — amount in rupees (we convert to paise internally)
+ */
+const createRazorpayOrder = async (req, res) => {
   try {
-    const { email, firstName } = req.user;
+    const { amount } = req.body;
 
-    const existingCustomer = await stripe.customers.list({
-      email: email,
-    });
-
-    if (existingCustomer.data.length) {
-      return res.status(400).json({ message: "Customer already exists" });
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ message: "Valid amount is required" });
     }
 
-    const customer = await stripe.customers.create({
-      email: email,
-      name: firstName,
+    const options = {
+      amount: Math.round(amount * 100), // Razorpay expects paise
+      currency: "INR",
+      receipt: `receipt_${Date.now()}`,
+      payment_capture: 1, // Auto-capture: moves payment from "authorized" → "captured"
+    };
+
+    const razorpayOrder = await razorpay.orders.create(options);
+
+    return res.status(201).json({
+      orderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      keyId: process.env.RAZORPAY_KEY_ID,
     });
-
-    console.log("customer", customer);
-
-    return res.status(201).json({ message: "Customer created", customer });
   } catch (error) {
-    res
-      .status(500)
-      .json({ error: error.message, message: "Customer not created" });
+    return res.status(500).json({ error: error.message, message: "Failed to create payment order" });
   }
 };
 
-const addCard = async (req, res) => {
+/**
+ * POST /payment/verify
+ * Verifies the HMAC signature from Razorpay after payment.
+ * Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature, appOrderId }
+ * appOrderId is our MongoDB Order _id to mark as paid.
+ */
+const verifyRazorpayPayment = async (req, res) => {
   try {
-    const { cardToken } = req.body;
-    const { email } = req.user;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, appOrderId } = req.body;
 
-    const customer = await stripe.customers.list({
-      email: email,
-    });
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ message: "Missing payment verification fields" });
+    }
 
-    const card = await stripe.customers.createSource(customer.data[0].id, {
-      source: cardToken,
-    });
+    // Validate HMAC signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body)
+      .digest("hex");
 
-    return res.status(201).json({ message: "Card added", card });
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ message: "Payment verification failed — invalid signature" });
+    }
+
+    // Mark our Order as paid if appOrderId provided
+    if (appOrderId) {
+      await Order.findByIdAndUpdate(appOrderId, {
+        paymentStatus: "paid",
+        paymentId: razorpay_payment_id,
+        razorpayOrderId: razorpay_order_id,
+      });
+    }
+
+    return res.status(200).json({ message: "Payment verified successfully", paymentId: razorpay_payment_id });
   } catch (error) {
-    res.status(500).json({ error: error.message, message: "Card not added" });
+    return res.status(500).json({ error: error.message, message: "Payment verification failed" });
   }
 };
 
-const chargeCard = async (req, res) => {
+/**
+ * Initiate a Razorpay refund (called internally by cancel/return controllers)
+ * @param {string} paymentId - Razorpay payment_id (e.g. pay_XXXXX)
+ * @param {number} amountInRupees - Amount to refund in rupees
+ * @returns {{ success: boolean, refund?: object, error?: string }}
+ */
+const initiateRazorpayRefund = async (paymentId, amountInRupees) => {
   try {
-    const { amount, currency, cardId } = req.body;
+    if (!paymentId) return { success: false, error: "No paymentId found" };
 
-    const payment = await stripe.paymentIntents.create({
-      amount: amount,
-      currency: currency,
-      payment_method: cardId,
-      confirm: true,
+    // Step 1: Verify the payment is captured (refundable)
+    const payment = await razorpay.payments.fetch(paymentId);
+    if (!payment || !payment.captured) {
+      console.warn(`[razorpay] Payment ${paymentId} not captured (status: ${payment?.status}). Cannot refund.`);
+      return { success: false, error: `Payment not captured (status: ${payment?.status})` };
+    }
+    if (payment.status === "refunded") {
+      console.log(`[razorpay] Payment ${paymentId} already fully refunded.`);
+      return { success: true, refund: { id: "already_refunded" } };
+    }
+
+    // Step 2: Issue refund (amount in paise)
+    const refundAmountPaise = Math.round(amountInRupees * 100);
+    const maxRefundable = payment.amount - (payment.amount_refunded || 0);
+
+    if (refundAmountPaise > maxRefundable) {
+      console.warn(`[razorpay] Requested refund ₹${amountInRupees} exceeds max refundable ₹${maxRefundable / 100}. Capping.`);
+    }
+
+    const refund = await razorpay.payments.refund(paymentId, {
+      amount: Math.min(refundAmountPaise, maxRefundable),
     });
 
-    return res.status(201).json({ message: "Payment successful", payment });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ error: error.message, message: "Payment not successful" });
+    console.log(`[razorpay] Refund initiated: ₹${amountInRupees} on ${paymentId} → ${refund.id} (status: ${refund.status})`);
+    return { success: true, refund };
+  } catch (err) {
+    const errMsg = err?.error?.description || err?.message || "Unknown refund error";
+    console.error(`[razorpay] Refund failed for ${paymentId}: ${errMsg}`);
+    return { success: false, error: errMsg };
   }
 };
 
-export { createCustomer, addCard, chargeCard };
+export { createRazorpayOrder, verifyRazorpayPayment, initiateRazorpayRefund };

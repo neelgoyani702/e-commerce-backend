@@ -1,6 +1,9 @@
 import Return from "../models/return.model.js";
 import Order from "../models/order.model.js";
 import Product from "../models/products.model.js";
+import User from "../models/user.model.js";
+import { sendEmail, returnPlacedEmail, returnApprovedEmail, returnRejectedEmail, returnRefundedEmail } from "../services/mail.service.js";
+import { initiateRazorpayRefund } from "./payment.controller.js";
 
 const RETURN_WINDOW_DAYS = 7;
 
@@ -84,6 +87,14 @@ const createReturn = async (req, res) => {
       refundAmount: Math.round(Math.max(refundAmount, 0)),
     });
 
+    // Send return placed email (non-blocking)
+    try {
+      const userData = await User.findById(req.user._id).select("email firstName");
+      if (userData?.email) {
+        sendEmail(userData.email, "Return Request Submitted 📋", returnPlacedEmail(returnRequest, userData));
+      }
+    } catch { /* non-fatal */ }
+
     return res.status(201).json({
       message: "Return request submitted successfully",
       returnRequest,
@@ -163,12 +174,41 @@ const updateReturnStatus = async (req, res) => {
 
     returnRequest.status = status;
     if (adminNote) returnRequest.adminNote = adminNote;
+
+    // Process Razorpay refund when marking as refunded
+    if (status === "refunded") {
+      const order = await Order.findById(returnRequest.orderId);
+      if (order && order.paymentMethod === "online" && order.paymentId) {
+        const refundResult = await initiateRazorpayRefund(order.paymentId, returnRequest.refundAmount);
+        if (refundResult.success) {
+          returnRequest.refundId = refundResult.refund?.id;
+          // Update order payment status for partial/full refund
+          order.paymentStatus = "refunded";
+          await order.save();
+        }
+      }
+    }
+
     const updated = await returnRequest.save();
 
     // Populate for response
     await updated.populate("userId", "firstName lastName email image");
     await updated.populate("orderId", "status totalAmount createdAt");
     await updated.populate("items.productId", "name image price");
+
+    // Send return status email (non-blocking)
+    try {
+      const userEmail = updated.userId?.email;
+      if (userEmail) {
+        if (status === "approved") {
+          sendEmail(userEmail, "Return Request Approved ✅", returnApprovedEmail(updated, updated.userId));
+        } else if (status === "rejected") {
+          sendEmail(userEmail, "Return Request Declined 😔", returnRejectedEmail(updated, updated.userId));
+        } else if (status === "refunded") {
+          sendEmail(userEmail, "Refund Processed 💰", returnRefundedEmail(updated, updated.userId));
+        }
+      }
+    } catch { /* non-fatal */ }
 
     return res.status(200).json({
       message: `Return ${status}`,

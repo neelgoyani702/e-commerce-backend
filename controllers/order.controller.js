@@ -3,6 +3,9 @@ import Cart from "../models/cart.model.js";
 import Product from "../models/products.model.js";
 import Coupon from "../models/coupon.model.js";
 import FlashSale from "../models/flashSale.model.js";
+import User from "../models/user.model.js";
+import { sendEmail, orderPlacedEmail, orderCancelledEmail } from "../services/mail.service.js";
+import { initiateRazorpayRefund } from "./payment.controller.js";
 
 const getOrders = async (req, res) => {
   try {
@@ -149,6 +152,7 @@ const placeOrder = async (req, res) => {
     }
 
     const finalAmount = cart.totalAmount - couponDiscount;
+    const paymentMethod = req.body.paymentMethod === "online" ? "online" : "cod";
 
     // Create the order
     const order = new Order({
@@ -162,6 +166,8 @@ const placeOrder = async (req, res) => {
       couponCode: appliedCouponCode,
       couponDiscount,
       products: cart.products,
+      paymentMethod,
+      paymentStatus: paymentMethod === "cod" ? "pending" : "pending",
       statusHistory: [{ status: "order placed", timestamp: new Date(), note: "Order placed successfully" }],
     });
 
@@ -200,6 +206,18 @@ const placeOrder = async (req, res) => {
       "products.productId",
       "name price image discount stock variants"
     );
+
+    // Send order confirmation email (non-blocking)
+    try {
+      const user = await User.findById(req.user._id).select("email firstName lastName");
+      if (user?.email) {
+        sendEmail(
+          user.email,
+          `Order Placed #${savedOrder._id}`,
+          orderPlacedEmail(populatedOrder, user)
+        );
+      }
+    } catch { /* email failure is non-fatal */ }
 
     return res
       .status(201)
@@ -249,7 +267,26 @@ const cancelOrder = async (req, res) => {
 
     order.status = "cancelled";
     order.statusHistory.push({ status: "cancelled", timestamp: new Date(), note: req.body?.note || "Order cancelled by customer" });
+
+    // Auto-refund for online payments
+    if (order.paymentMethod === "online" && order.paymentStatus === "paid" && order.paymentId) {
+      const refundResult = await initiateRazorpayRefund(order.paymentId, order.totalAmount);
+      if (refundResult.success) {
+        order.paymentStatus = "refunded";
+        order.statusHistory.push({ status: "refund_initiated", timestamp: new Date(), note: `Refund ₹${order.totalAmount} initiated (${refundResult.refund?.id})` });
+      }
+    }
+
     const updatedOrder = await order.save();
+
+    // Populate and send cancellation email
+    await updatedOrder.populate("products.productId", "name price image");
+    try {
+      const userData = await User.findById(req.user._id).select("email firstName");
+      if (userData?.email) {
+        sendEmail(userData.email, `Order Cancelled #${order._id}`, orderCancelledEmail(updatedOrder, userData, "customer"));
+      }
+    } catch { /* non-fatal */ }
 
     return res
       .status(200)
